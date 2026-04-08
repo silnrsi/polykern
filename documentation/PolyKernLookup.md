@@ -59,7 +59,7 @@ _boundary_
 | Point | leftPoints\[numLeftPoints\] | Points in the left boundary polyline from bottom to top |
 | Point | rightPoints\[numRightPoints\] | Points in the right boundary polyline from top to bottom |
 
-A point is a simple (x, y) pair in font units taking a total of 32 bits.
+A `point` is a simple x/y pair in font units, taking a total of 32 bits.
 
 _point_
 
@@ -80,18 +80,19 @@ Here we describe an algorithm for processing the PolyKern lookup. Other algorith
 
 4. Compare their positioned bounding boundary boxes.
 5. If they overlap in the y-axis (ignoring x-axis):
-5.1 Calculate their minimum required separation, given the current maximum separation, 
+  5.1 Calculate their minimum required separation, given the current maximum separation, 
     the two glyphs and their relative positions.
-5.2 If their minimum required separation is less than the current separation, update the current separation.
+  5.2 If their minimum required separation is less than the current separation, update the current separation.
 6. If the left glyph is not a non-spacing base (baseMarkCoverage):
-6.1. Choose the previous glyph to the left glyph as the next left glyph.6.2. goto 4.
+  6.1. Choose the previous glyph to the left glyph as the next left glyph.
+  6.2. Goto 4.
 7. Choose the next glyph after the right glyph as the new right glyph.
 8. If the new right glyph is not a base glyph:
-8.1. Goto 4.
+  8.1. Goto 4.
 9. If processing left to right:
-9.1 Add the current minimum separation to the first base before the initially identified glyph.
+  9.1 Add the current minimum separation to the first base before the initially identified glyph.
 10. Else if processing right to left:
-10.1 Add the current minimum separation to the initially identified glyph.
+  10.1 Add the current minimum separation to the initially identified glyph.
 ```
 
 There is a sub-algorithm needed to calculate the minimum separation of two glyphs given the current maximum separation and current required space. The _relative distance_ between the two glyphs is the difference between their positioned origins.
@@ -104,32 +105,33 @@ There is a sub-algorithm needed to calculate the minimum separation of two glyph
 4. Set y to the minimum y of the two points.
 
 5. While y < the right point's y-value:
-5.1. Set the right point to the next left boundary point on the right glyph if there is one, 
+  5.1. Set the right point to the next left boundary point on the right glyph if there is one, 
      else set it as a non point.
 6. While y minus the relative y-distance < the left point's y-value:
-6.1. Set the left point to the next right boundary point on the left glyph if there is one, 
+  6.1. Set the left point to the next right boundary point on the left glyph if there is one, 
      else set it as a non point.
 
 7. If the previous right point's y-value == y:
-7.1. Set L (a local value) to that previous right point's x-value.
+  7.1. Set L (a local value) to that previous right point's x-value.
 8. Else if the right point is a point:
-8.1. Set L to the interpolation between the right point, previous right point and y.
+  8.1. Set L to the interpolation between the right point, previous right point and y.
 9. Else:
-9.1. Clear L.
+  9.1. Clear L.
 
 10. If the previous left point's y-value == y - relative y-distance:
-10.1. Set R to the previous left point's x-value plus the relative x-distance
+  10.1. Set R to the previous left point's x-value plus the relative x-distance.
 11. Else if the left point is a point:
-11.1 Set R to the interpolation between the left point, previous left point, y and the relative y distince, 
-     and then add the relative x-distance to it.
+  11.1 Set R to the interpolation between the left point, previous left point, y and the relative y distince, 
+       and then add the relative x-distance to it.
 12. Else:
-12.1 Clear R.
+  12.1 Clear R.
 
 13. If L and R are not clear:
-13.1 Set the current maximum separation to the minimum of the current maximum separation and R - L.
-13.2 If both left or right are still points (and not set to non points):
-13.2.1 Set y to the maximum of current right y-value and the sum of current left y-value and the relative y difference.
-13.2.2 Goto 5.
+  13.1 Set the current maximum separation to the minimum of the current maximum separation and R - L.
+  13.2 If both left or right are still points (and not set to non points):
+    13.2.1 Set y to the maximum of current right y-value and the sum of
+           current left y-value and the relative y difference.
+    13.2.2 Goto 5.
 
 14. Return the current maximum separation.
 ```
@@ -147,18 +149,6 @@ Given a top and bottom point (the point and previous point), y and a y offset of
 
 # Questions
 
-Here are some questions that it would be good to answer before proceeding:
-
-1. **Should the boundaries be stored in the lookup or in GDEF?**  
+1. Should the boundaries be stored in the lookup or in GDEF?
    1. The polylines take up quite a bit of space once you consider all the glyphs and that is lookup space, forcing extensions. The GDEF is a good place for AP positions as well as polylines.  
    2. Would we ever want to do two lookups with different polylines?  
-2. Is top to bottom for the boundary polyline most appropriate for both sides? If we made it top to bottom then bottom to top, it is in effect one polyline?  
-   1. VG: Might make more sense to font designers to think of the ‘poly’ like they do a good cubic PS outline: counterclockwise starting near the origin (bottom left). But then again very few designers will ever look at it, and TT quads IIRC should be clockwise. In either case the left and right should be opposite y directions.  
-   2. Agreed and integrated  
-3. Is this proposal ready for presenting and engaging the OpenType community over?  
-   1. VG: I’d suggest that it should be run past Simon Cozens and Toshi Omagari first. Both of them have done this thinking before and maybe even have put forward proposals.  
-      1. Toshi is doing a presentation at ATypI Stanford in May (that I am also attending) on [BubbleKern Revisited](https://atypi.org/presentation/bubblekern-revisited/) (see link)  
-      2. It would be good if we were in harmony with his thinking once we know what it is. Could we ask him for details before ATypI?  
-4. If Bubble kern is an inappropriate name, what recommendations do you have for a name?  
-   1. VG: PolyKern?
-
