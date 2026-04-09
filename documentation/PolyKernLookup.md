@@ -10,7 +10,7 @@ In creating a Nastaliq Arabic font, it is possible to produce an approximate hor
 
 # Description
 
-The PolyKern lookup (GPOS lookup type 10\) is based around giving piecewise straight line boundaries (“polylines”) to the left and right of glyphs that need to be kerned. The goal of the algorithm is to shift the kernable glyphs such that their polylines abut the adjacent glyph without colliding. The process must also handle the fact that secondary glyphs may be attached to the base and their polylines must be taken into account. Particularly in Nastaliq, these secondary glyphs may include not only diacritics but also other bases that are attached cursively. Each glyph has two polylines, one on the left and the other on the right, to control the horizontal adjustment of the glyphs. The polylines are positioned in relation to the glyph outline so as to give the desired design margin between the closest point between two clusters. Each glyph's polylines are contained within a single bounding box, which differs from the bounding box of the glyph outline. The lookup adjusts the spacing between the two clusters in order that the combined right polylines of the left glyphs just touch the combined left polylines of the right glyphs.
+The PolyKern lookup (GPOS lookup type 10\) is based around giving piecewise straight line boundaries (“polylines”) to the left and right of glyphs that need to be kerned. The goal of the algorithm is to shift the kernable glyphs such that their polylines abut the adjacent glyph without colliding. The process must also handle the fact that secondary glyphs may be attached to the base and their polylines must be taken into account as well. Particularly in Nastaliq, these secondary glyphs may include not only diacritics but also other bases that are attached cursively. Each glyph has two polylines, one on the left and the other on the right, to control the horizontal adjustment of the glyphs. The polylines are positioned in relation to the glyph outline so as to give the desired design margin between the closest point between two clusters. Each glyph's polylines are contained within a single bounding box, which differs from the bounding box of the glyph outline. The lookup adjusts the spacing between the two clusters in order that the combined right polylines of the left glyphs just touch the combined left polylines of the right glyphs.
 
 ![Glyphs with polylines](images/GlyphsWithPolylines.png)
 
@@ -72,7 +72,7 @@ _point_
 
 Here we describe an algorithm for processing the PolyKern lookup. Other algorithms may be used so long as they give the same results. For the purposes of the algorithm, attached bases are treated as marks. Processing is done in surface order which contrasts from logical underlying order, but is direction independent. The algorithm calculates a shift value in the x-axis which may be negative to push overlapping glyphs apart. This value is initialised to a representation of infinity and the algorithm reduces this to the resulting shift. The represetation of infinity is an implementation detail. For example for an n-bit 2's complement integer it might be represented by 2^(n-1) - 1.
 
-The algorithm calculates an extra separation caused by spaces between two clusters. If that extra separation is large enough, kerning my be unnecessary. The algorithm also tends to make the spacing between clusters uniform according to the polylines, this may require modifying if tracking is desired, for example.
+The algorithm calculates an extra separation caused by spaces between two clusters. If that extra separation is large enough, kerning may be unnecessary. The algorithm also tends to make the spacing between clusters uniform according to the polylines; this may require modifying if tracking is desired, for example.
 ```
 1. Identify a non-space base glyph to be kerned in relation to a previous cluster. 
    Call this the right glyph.
@@ -90,12 +90,12 @@ The algorithm calculates an extra separation caused by spaces between two cluste
   5.2 Calculate their required shift, given the current shift, the two glyphs
       and their relative distance in x & y.
   5.2 If their required shift is less than the current shift, update the current shift.
-6. Set the left glyph to be the previous glyph to the left glyph (which is the next in RTL logical order)
+6. Set the left glyph to be the previous glyph to the left glyph (which is the next in RTL logical order).
 7. If the new left glyph exists and is a baseAttach or mark:
   7.1. Goto 4.
-8. Set the right glyph as the next glyph after the right glyph (which is previous in RTL logical order)
+8. Set the right glyph as the next glyph after the right glyph (which is previous in RTL logical order).
 9. If the new right glyph exists and is a baseAttach or mark:
-  9.1. Set the left glyph to the first left glyph
+  9.1. Set the left glyph to the first left glyph.
   9.2. Goto 4.
 10. If processing left to right and the shift is not infinite:
   10.1 Subtract the current shift from the advance of the first base before the initially identified glyph.
