@@ -70,79 +70,89 @@ _point_
 
 ## Algorithm
 
-Here we describe an algorithm for processing the PolyKern lookup. Other algorithms may be used so long as they give the same results. For the purposes of the algorithm, attached bases are treated as marks.
+Here we describe an algorithm for processing the PolyKern lookup. Other algorithms may be used so long as they give the same results. For the purposes of the algorithm, attached bases are treated as marks. Processing is done in surface order which contrasts from logical underlying order, but is direction independent. The algorithm calculates a shift value in the x-axis which may be negative to push overlapping glyphs apart. This value is initialised to a representation of infinity and the algorithm reduces this to the resulting shift. The represetation of infinity is an implementation detail. For example for an n-bit 2's complement integer it might be represented by 2^(n-1) - 1.
 
+The algorithm calculates an extra separation caused by spaces between two clusters. If that extra separation is large enough, kerning my be unnecessary. The algorithm also tends to make the spacing between clusters uniform according to the polylines, this may require modifying if tracking is desired, for example.
 ```
 1. Identify a non-space base glyph to be kerned in relation to a previous cluster. 
-   Call this the ‘right’ glyph.
-2. Start with an initially infinite current maximum separation (1 million em units should suffice).
-3. Start with the ‘left’ glyph as being the glyph previous to the right glyph.
+   Call this the right glyph.
+2. Start with an initially infinite current shift and 0 extra shift
+3. Scan backwards (in LTR) or forwards (in RTL) to find the next visible glyph
+  3.1 If a glyph is invisible, add its width to the extra separation
+  3.2 The first left glyph is the first visible glyph encountered
+  3.3 Set the left glyph to the first left glyph
 
 4. Compare their positioned bounding boundary boxes.
 5. If they overlap in the y-axis (ignoring x-axis):
-  5.1 Calculate their minimum required separation, given the current maximum separation, 
-    the two glyphs and their relative positions.
-  5.2 If their minimum required separation is less than the current separation, update the current separation.
-6. If the left glyph is not a non-spacing base (baseMarkCoverage):
-  6.1. Choose the previous glyph to the left glyph as the next left glyph.
-  6.2. Goto 4.
-7. Choose the next glyph after the right glyph as the new right glyph.
-8. If the new right glyph is not a base glyph:
-  8.1. Goto 4.
-9. If processing left to right:
-  9.1 Add the current minimum separation to the first base before the initially identified glyph.
-10. Else if processing right to left:
-  10.1 Add the current minimum separation to the initially identified glyph.
+  5.1 Calculate the relative distance between the two glyphs
+    5.1.1 The y relative distance is the right glyph's y position - left glyph's y position
+    5.1.2 The x relative distance is the right glyph's x position - left glyph's x position - extra separation
+  5.2 Calculate their required shift, given the current shift, the two glyphs
+      and their relative distance in x & y.
+  5.2 If their required shift is less than the current shift, update the current shift.
+6. Set the left glyph to be the previous glyph to the left glyph (which is the next in RTL logical order)
+7. If the new left glyph exists and is a baseAttach or mark:
+  7.1. Goto 4.
+8. Set the right glyph as the next glyph after the right glyph (which is previous in RTL logical order)
+9. If the new right glyph exists and is a baseAttach or mark:
+  9.1. Set the left glyph to the first left glyph
+  9.2. Goto 4.
+10. If processing left to right and the shift is not infinite:
+  10.1 Subtract the current shift from the advance of the first base before the initially identified glyph.
+11. Else if processing right to left and the shift is not infinite:
+  11.1 Subtract the current shift from the advance of the initially identified (right) glyph.
 ```
 
-There is a sub-algorithm needed to calculate the minimum separation of two glyphs given the current maximum separation and current required space. The _relative distance_ between the two glyphs is the difference between their positioned origins.
+There is a sub-algorithm needed to calculate the minimum separation of two glyphs given the current maximum separation and current required space. The _relative distance_ between the two glyphs is the signed difference between their positioned origins. We process from top to bottom
 
 ```
-1. If the distance between the bounding boundary boxes in x is greater than the current maximum separation, 
-   return the current maximum separation.
+1. If the distance between the bounding boundary boxes in x is greater than the current shift, 
+   return the current shift.
 2. Start with the first right boundary point of the left glyph calling it the left point.
-3. Start with the left boundary point of the right glyph calling it the right point.
+3. Start with the last left boundary point of the right glyph calling it the right point.
 4. Set y to the minimum y of the two points.
 
-5. While y < the right point's y-value:
-  5.1. Set the right point to the next left boundary point on the right glyph if there is one, 
+5. While y <= the right point's y:
+  5.1. Set the right point to the previous left boundary point on the right glyph if there is one, 
      else set it as a non point.
-6. While y minus the relative y-distance < the left point's y-value:
+6. While y minus the relative y <= the left point's y:
   6.1. Set the left point to the next right boundary point on the left glyph if there is one, 
      else set it as a non point.
 
-7. If the previous right point's y-value == y:
-  7.1. Set L (a local value) to that previous right point's x-value.
+7. If the previous right point's y == y:
+  7.1. Set L (a local value) to that previous right point's x.
 8. Else if the right point is a point:
-  8.1. Set L to the interpolation between the right point, previous right point and y.
+  8.1. Set L to the interpolation between the right point, previous right point and y, for max x.
 9. Else:
   9.1. Clear L.
 
-10. If the previous left point's y-value == y - relative y-distance:
-  10.1. Set R to the previous left point's x-value plus the relative x-distance.
+10. If the previous left point's y == y + relative y:
+  10.1. Set R to the previous left point's x plus the relative x.
 11. Else if the left point is a point:
-  11.1 Set R to the interpolation between the left point, previous left point, y and the relative y distince, 
-       and then add the relative x-distance to it.
+  11.1 Set R to the interpolation between the left point, previous left point, y - relative y, for min x, 
+       and then add the relative x to it.
 12. Else:
   12.1 Clear R.
 
-13. If L and R are not clear:
-  13.1 Set the current maximum separation to the minimum of the current maximum separation and R - L.
+13. If both L and R are not clear:
+  13.1 Set the current shift to the minimum of the current shift and R - L.
   13.2 If both left or right are still points (and not set to non points):
-    13.2.1 Set y to the maximum of current right y-value and the sum of
-           current left y-value and the relative y difference.
+    13.2.1 Set y to the maximum of current right y and the sum of current left y and the relative y.
     13.2.2 Goto 5.
 
-14. Return the current maximum separation.
+14. Return the current shift.
 ```
 
 The interpolation algorithm is a simple straight line calculation of x given y and the end points:
 
 ```
 Given a top and bottom point (the point and previous point), y and a y offset of the two points
-1. Set t to (y - offset - bottom y) / (top y - bottom y).
-2. Set x to t * top x + (1 - t) * bottom x.
-3. Return x.
+1. If top y == bottom y:
+  1.1 If max x is requested, return the maximum of top x and bottom x
+  1.2 Else return the minimum of top x and bottom x
+2. Set t to (y - offset - bottom y) / (top y - bottom y).
+3. Set x to t * top x + (1 - t) * bottom x.
+4. Return x.
 ```
 
 ---
