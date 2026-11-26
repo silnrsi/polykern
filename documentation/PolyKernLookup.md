@@ -8,9 +8,11 @@ This proposal presents a new lookup that implements a polyline outline based ker
 
 In creating a Nastaliq Arabic font, it is possible to produce an approximate horizontal kerning that allows for overlaps, etc. But it is very slow given the huge limitations of existing OpenType lookups.
 
+The reasons for many of the choices in this proposal, with examples, are given in the FAQ (PolyKernFAQ.md).
+
 # Description
 
-The PolyKern lookup (GPOS lookup type 10\) is based around giving piecewise straight line boundaries (“polylines”) to the left and right of glyphs that need to be kerned. The goal of the algorithm is to shift the kernable glyphs such that their polylines abut the adjacent glyph without colliding. The process must also handle the fact that secondary glyphs may be attached to the base and their polylines must be taken into account as well. Particularly in Nastaliq, these secondary glyphs may include not only diacritics but also other bases that are attached cursively. Each glyph has two polylines, one on the left and the other on the right, to control the horizontal adjustment of the glyphs. The polylines are positioned in relation to the glyph outline so as to give the desired design margin between the closest point between two clusters. Each glyph's polylines are contained within a single bounding box, which differs from the bounding box of the glyph outline. The lookup adjusts the spacing between the two clusters in order that the combined right polylines of the left glyphs just touch the combined left polylines of the right glyphs.
+The PolyKern lookup (GPOS lookup type 10) gives each glyph that takes part piecewise straight boundaries (“polylines”) on its left and right. Kerning moves each cluster as close to the glyphs before it as their polylines allow: afterwards, the polylines of the cluster just touch the polylines of the glyphs before it, and any spaces between them keep their width. The polylines of attached glyphs count too. Particularly in Nastaliq, these include not only diacritics but also other bases that are attached cursively. Because the algorithm brings polylines into contact, **the polylines must include all the space wanted between glyphs**: they are drawn outside the glyph outline by the desired design margin. The algorithm adds no space of its own, other than the width of spaces in the text. The margin around a mark should be at least that around its base, so that a mark never ends up closer to another cluster than the glyph it is attached to. Each glyph's polylines lie within a bounding box, which is not the same as the bounding box of the glyph outline.
 
 ![Glyphs with polylines](images/GlyphsWithPolylines.png)
 
@@ -18,11 +20,11 @@ The simplest OpenType model does not have the concept of clusters. Glyphs are po
 
 In order to identify which glyphs are in a cluster we have to categorise them. The GDEF table categorises glyphs into marks and bases (with ligatures being a subtype of base). In addition we also need to identify glyphs that are marked as bases by GDEF but that are joined to the glyph before them, for example by cursive attachment. We call these attached bases and they are part of the cluster. Whether a base is an attached base is decided by its glyph ID alone, using a coverage table, not by any attachment the shaper has actually made. This suits fonts, such as most Arabic fonts, in which a glyph that joins to the glyph before it (a medial or final form) is always joined. Note that bases are often attached in the opposite order, so care must be taken in identifying which glyph IDs are considered attached bases for this lookup.
 
-Spaces are glyphs in the base coverage table that have no boundary. A space glyph is kerned across but keeps its width. Thus a space glyph between two clusters is handled as if we were kerning the two clusters without the space and then the distance between them is increased by the width of the space. Glyphs that are in neither coverage table act as barriers: no kerning takes place across them.
+Spaces are glyphs in the base coverage table that have no boundary. A space glyph is kerned across but keeps its width. Thus a space glyph between two clusters is handled as if we were kerning the two clusters without the space and then the distance between them is increased by the width of the space. Glyphs that are not marks and are in neither the base nor the attached coverage table act as barriers: no kerning takes place across them.
 
-It is not always the case that every glyph is to be kerned. For example, in Nastaliq, punctuation may need to be not kerned under a following word. Such a glyph may be left out of both coverage tables, so that it acts as a barrier, or it may be given a boundary that stops the following word moving under it. Also having coverage tables of ‘involved’ glyphs keeps the lookup in the same model as other GPOS lookups where the GPOS table is skipped for all glyphs not in the coverage table.
+It is not always the case that every glyph is to be kerned. For example, in Nastaliq, punctuation may need to be not kerned under a following word. Such a glyph may be left out of the base and attached coverage tables, so that it acts as a barrier, or it may be given a boundary that stops the following word moving under it. Also having coverage tables of ‘involved’ glyphs keeps the lookup in the same model as other GPOS lookups where the GPOS table is skipped for all glyphs not in the coverage table.
 
-Each polyline is made up of straight line components. For simplicity, at any y position within the bounding box of the polyline, there may only be one point that is on the polyline. That is, a polyline may not have a vertical cup shape. In effect, it is convex in the x direction.
+Each polyline is made up of straight lines. A polyline never doubles back in y: at any height within its range there is only one place it can be, though it may run horizontally for a while. So a polyline can follow the side of a glyph but cannot have a cup shape opening up or down.
 
 ## Structure
 
@@ -33,35 +35,39 @@ _PolyPosFormat1 subtable_
 | Type | Name | Description |
 | :--- | :--- | :---------- |
 | uint16 | format | Format identifier ― format \= 1 |
-| Offset16 | baseCoverageOffset | Offset to a coverage table of all base glyphs to consider, including spaces |
-| Offset16 | baseAttachedCoverageOffset | Offset to a coverage table of all base glyphs to be treated as attached bases. |
-| Offset16 | boundariesArrayOffset | Offset to an array of boundaries for all glyphs in the font |
+| uint16 | boundaryCount | Number of glyphs in the boundary coverage table |
+| Offset32 | boundaryCoverageOffset | Offset to a coverage table of the glyphs that have a boundary, including marks |
+| Offset32 | baseCoverageOffset | Offset to a coverage table of the base glyphs to kern, including spaces |
+| Offset32 | attachedCoverageOffset | Offset to a coverage table of the base glyphs to treat as attached bases |
+| Offset32 | varIndexBasesOffset | Offset to the varIndexBases array, or NULL if no boundary varies |
+| Offset32 | boundaryOffsets\[boundaryCount\] | Offsets to boundary structures, in boundary coverage index order |
 
-The `boundariesArray` contains a list of offsets to a boundary structure for each glyph. Offsets are relative to the start of the `boundariesArray`. Thus an offset of 0 may be used as a sentinel value. A value of 0 indicates that this glyph has no boundary information. For a glyph in the base coverage table this means it is a space. For a mark or attached base it means the glyph takes part in its cluster but adds no boundary. Glyphs in neither coverage table, and not marks, are barriers whatever their entry. Since this is a mapping between glyph and boundary, two different glyphs may share the same boundary.
+All offsets are from the start of the subtable. They are 32-bit because the boundaries are large and coverage tables may be shared with other lookups. `boundaryCount` always equals the number of glyphs in the boundary coverage table; it is given so that the size of `boundaryOffsets` is known without reading the coverage table, and it comes straight after `format` so that the offsets are 4-byte aligned.
 
-_boundariesArray_
+A glyph *has a boundary* if it is in the boundary coverage table. Its coverage index selects its entry in `boundaryOffsets`. Glyphs may share a boundary, by having entries that point to the same boundary structure. A glyph in the base coverage table that has no boundary is a space.
+
+_varIndexBases array_
 
 | Type | Name | Description |
 | :--- | :--- | :---------- |
-| Offset32 | boundary\[numGlyphs\] | Offset to a boundary structure for each glyph. numGlyphs comes from the maxp font table. |
+| uint32 | varIndexBase\[boundaryCount\] | For each glyph in the boundary coverage table, in coverage index order: the first variation index for its boundary, or 0xFFFFFFFF if its boundary does not vary |
 
-The `boundary` structure contains 3 elements: a bounding box for the kerning polylines, such that all the points in `leftPoints` and `rightPoints` must lie within this bounding box, and two lists of points, one for each side of the glyph. The points in each list form a continuous polyline of straight lines. The two polylines are listed in sequence. The first is the left polyline and is described from the lowest y point in either polyline up to the highest y-point in any polyline. The y-value of a subsequent point in the line may not be less than the previous point. The second polyline immediately follows the left polyline and is the right polyline. It starts from the highest y-point (which is the same as the y-value of the last point in the left polyline, and proceeds downwards to the last point which has the same y-value as the first point in the left polyline. No point in the right polyline may have a y-value greater than the previous point. The result is a single outline describing the protected kerning area around the glyph. The whole outline is described within a bounding box which is also listed to speed up the lookup.
-
-In some cases glyphs will never occur requiring a left or a right polyline. For simplicity of implementation in case the situation where such a polyline is required should occur, both polylines must exist, but nothing says both polylines need to reflect the glyph. A polyline may be a single line with a top and a bottom that goes straight through the glyph. Each polyline must have at least 2 points.
+In a variable font, the values in a boundary vary using the ItemVariationStore in the GDEF table, as GPOS adjustments do. The values of a boundary are numbered from 0: minPoint.x, minPoint.y, maxPoint.x, maxPoint.y, then the x and y of each point of `leftPoints`, then of `rightPoints`. Value *k* takes its delta from variation index `varIndexBase + k`, interpreted as in COLR version 1: the upper 16 bits are the outer index and the lower 16 bits the inner index into the ItemVariationStore. A font that does not vary leaves `varIndexBasesOffset` NULL and pays nothing. The algorithm uses the boundaries with their deltas applied for the current instance. The rules for polylines below must hold at every instance, not just the default.
 
 _boundary_
 
 | Type | Name | Description |
 | :--- | :--- | :---------- |
-| uint8 | numLeftPoints | Number of points in the left side polyline |
-| uint8 | numRightPoints | Number of points in the right side polyline |
-| uint16 | reserved |  |
-| Point | minPoint | Bottom left of polyline bounding box |
-| Point | maxPoint | Top right of polyline bounding box |
-| Point | leftPoints\[numLeftPoints\] | Points in the left boundary polyline from bottom to top |
-| Point | rightPoints\[numRightPoints\] | Points in the right boundary polyline from top to bottom |
+| uint8 | numLeftPoints | Number of points in the left polyline |
+| uint8 | numRightPoints | Number of points in the right polyline |
+| Point | minPoint | Bottom left of the boundary's bounding box |
+| Point | maxPoint | Top right of the boundary's bounding box |
+| Point | leftPoints\[numLeftPoints\] | Points of the left polyline, from bottom to top |
+| Point | rightPoints\[numRightPoints\] | Points of the right polyline, from top to bottom |
 
-A `point` is a simple x/y pair in font units, taking a total of 32 bits.
+A boundary is a bounding box and two polylines, one for each side of the glyph. Every point of both polylines lies within the bounding box. Each polyline is a sequence of straight lines through its points, and has at least 2 points. The left polyline goes from bottom to top: no point is lower than the one before it. The right polyline goes from top to bottom: no point is higher than the one before it. Horizontal segments are allowed. Read in order, left then right, the two polylines go round the glyph, so the boundary can be thought of as a single outline around the area to be kept clear. The two polylines need not cover the same range of heights.
+
+Where a glyph never needs one of its polylines, the polyline must still be there, but need not follow the glyph. It may be a single line from the bottom to the top of the bounding box.
 
 _point_
 
@@ -80,9 +86,11 @@ Each glyph in the run is put into one of the following categories:
 
 - **Ignored**: the glyph is skipped according to the lookup flags (for example `IgnoreMarks` or a mark filtering set).
 - **Mark**: GDEF glyph class 3.
-- **Attached base**: a non-mark glyph in the `baseAttachedCoverage` table.
-- **Space**: a glyph in the `baseCoverage` table whose boundary offset is 0.
-- **Kernable base**: any other glyph in the `baseCoverage` table.
+- **Attached base**: a non-mark glyph in the `attachedCoverage` table.
+- **Space**: a glyph in the `baseCoverage` table that is not in the `boundaryCoverage` table.
+- **Kernable base**: a glyph in both the `baseCoverage` and `boundaryCoverage` tables.
+
+Ligatures (GDEF glyph class 2) count as bases like any other.
 - **Barrier**: any other glyph.
 
 A cluster (a skeleton cluster, see above) is a run of consecutive glyphs in logical order, identified by its first and last glyph. A glyph *starts a cluster* if it is a kernable base, or if it is an attached base and the glyph before it is not a mark, an attached base, a kernable base or ignored. The cluster runs from that glyph through all the immediately following marks, attached bases and ignored glyphs.[^attached] A mark that does not follow a cluster is not part of any cluster. Each cluster is kerned against the glyphs before it, working backwards. A barrier stops all backward iteration: no glyph before a barrier is ever compared with a glyph after it, so nothing is kerned across a barrier.
@@ -91,7 +99,9 @@ A cluster (a skeleton cluster, see above) is a run of consecutive glyphs in logi
 
 The algorithm uses the positions of the glyphs as they stand when the lookup is applied, with all mark and cursive attachments resolved. A PolyKern lookup must therefore come after all the lookups that attach glyphs in the clusters it kerns. Implementations whose attachment offsets are resolved only at the end of GPOS processing must resolve them before this lookup runs.
 
-Positions are in font units, and x increases to the right whatever the text direction.
+Positions are in font units, and x increases to the right whatever the text direction. All values and calculations are integers, including boundaries with any variation deltas applied.
+
+PolyKern is for horizontal text only: it moves glyphs in x and treats a glyph's y offset as its height. It works across the whole run that the shaper gives it, and is not limited by syllable or shaping cluster boundaries: a cluster is kerned against glyphs back across any number of words, as far as the nearest barrier.
 
 ### Main algorithm
 
@@ -197,7 +207,7 @@ The shift is a kern: the change in the space between *F* and the glyphs before i
 
 Steps 6.1 and 6.2 compare the earlier glyph with the whole of *F*, and steps 6.3.3 and 6.3.4 with each glyph of *F*, using the bounding boxes in the boundary structures to avoid calculating separations that cannot change the shift. Two glyphs whose boxes don't overlap in y have no separation. The separation of two glyphs is never less than the gap between their boxes, so if the extra separation minus the box gap is already no more than the current shift, the separation cannot increase it. Step 7 stops the walk back once no glyph before the cluster just reached could need a larger shift. Until a shift has been found, the test in step 7.4 uses 0. That is, the walk stops once nothing further back could collide with *F* where it is now, even though something further back might have pulled *F* towards it. This stops a cluster that overlaps nothing vertically from walking back to the start of the run.
 
-When *F* would collide with a cluster before the previous one, the extra space needed to avoid it could be put in either of two places: between *F* and the previous cluster, or between the previous cluster and the one *F* would collide with. This algorithm puts it before *F*, so that kerns already calculated never change. The situation is rare in practice, and the choice makes little visible difference.
+There is a choice to be made when *F* would collide with a cluster before the previous one. The extra space needed to avoid it could go in either of two places: between *F* and the previous cluster, or between the previous cluster and the one *F* would collide with. This specification puts it before *F*, so that kerns already calculated never change. In practice the other choice would make little visible difference.
 
 ### Separation of two glyphs
 
@@ -241,15 +251,26 @@ Steps 6.2 and 7.2 find the x of a polyline at height y by interpolating along th
 
 Each polyline has at least 2 points, and the bottom is no higher than the lowest point of either polyline. So in steps 4, 5, 6.2, 7.2 and 10 the points referred to always exist.
 
-The interpolation in steps 6.2 and 7.2 needn't be exact. Results only need to be within 1 font unit. If it is done in integers, round up when calculating the left x and down when calculating the right x. Any error then makes the glyphs slightly further apart, never closer. Notice that the products in the interpolation can be bigger than 32 bits.
+The calculations are in integers. How the division in steps 6.2 and 7.2 is rounded is left to the implementation, since results only need to be within 1 font unit. Notice that the products in the interpolation can be bigger than 32 bits.
 
 [^attached]: An attached base can start a cluster because attachment is decided by glyph ID, not by what the shaper actually attached. A font may use the same glyph both joined and at the start of a word, and a zero-width glyph shaped as a space (such as U+FEFF) may sit between two joined glyphs. In Awami Nastaliq both happen in real text.
 
----
+## Integration
 
-# Questions
+### Where the lookup goes
 
-1. Should the boundaries be stored in the lookup or in GDEF?
-   1. The polylines take up quite a bit of space once you consider all the glyphs and that is lookup space, forcing extensions. The GDEF is a good place for AP positions as well as polylines.  
-   2. Would we ever want to do two lookups with different polylines?  
-2. Where should the extra space go when a cluster would collide with one before the previous cluster? The algorithm puts it just before the cluster being kerned, so that earlier kerns never change. It could instead go after the cluster that would be collided with, keeping the previous cluster tight against the one being kerned.
+A PolyKern lookup belongs in the `kern` feature of GPOS. It uses the positions of glyphs after mark and cursive attachment, so it must come after every lookup that attaches glyphs in the clusters it kerns: in practice, after the `curs`, `mark` and `mkmk` lookups in the lookup list. A font should not also kern the same glyphs with other lookups, since PolyKern sets the space between clusters itself.
+
+A shaping engine that resolves attachment offsets only at the end of GPOS processing, as HarfBuzz does, must resolve them before running a PolyKern lookup, at least for the glyphs involved.
+
+### Size
+
+The boundaries for a font can be large: about 100 KB for Awami Nastaliq. The subtable's own offsets are 32-bit, so the boundaries and coverage tables can be placed anywhere after the subtable header. The header itself is small, so the lookup's 16-bit offset to the subtable is normally enough, and no Extension lookup is needed unless the subtable header itself is placed far from its lookup.
+
+### Variable fonts
+
+Boundaries vary through the GDEF ItemVariationStore, as described under Structure. A font that varies PolyKern boundaries must have a GDEF table with an ItemVariationStore.
+
+### Fallback for engines without PolyKern
+
+Fonts that use PolyKern will also need ordinary kerning, for shaping engines that do not support PolyKern. But an engine that does support PolyKern must not apply both. A separate proposal, *Condition Table Format 6: Lookup Support* (ConditionLookupSupport.md), adds a FeatureVariations condition that tests whether the engine supports a given lookup type and subtable format. With it, the `kern` feature lists the ordinary kerning lookups by default, and a FeatureVariations record that tests for GPOS lookup type 10, format 1, substitutes the PolyKern lookup instead. Engines that do not recognise the condition, or do not support FeatureVariations, keep the ordinary kerning.

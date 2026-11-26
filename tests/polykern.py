@@ -2,28 +2,38 @@
 '''A direct transcription of the PolyKern algorithm in documentation/PolyKernLookup.md.
 
 Step numbers in the comments refer to the steps in that document. The aim is to follow
-the description, not to be fast.
+the description, not to be fast, and to be written so that it carries over directly to
+C or C++: plain loops over indices, a flag beside any value that may be "none", and no
+lists built on the fly. The statistics gathered for testing are marked; an engine would
+leave them out.
 '''
 
+# The glyph categories (see "Glyph categories" in the specification)
 IGNORED, MARK, ATTACHED, SPACE, KERNABLE, BARRIER = range(6)
 CATNAMES = ['ignored', 'mark', 'attached', 'space', 'kernable', 'barrier']
 
+# Indexes into a point (x, y) and a bounding box (xMin, yMin, xMax, yMax). A boundary's
+# bbox is its minPoint and maxPoint.
+X, Y = 0, 1
+XMIN, YMIN, XMAX, YMAX = 0, 1, 2, 3
+
 
 class Glyph:
-    '''One glyph in the run. adv is the advance, xoff and yoff the resolved offsets.
-    bnd is a Boundary (see makepolylines) or None.'''
+    '''One glyph in the run, as the shaper has positioned it.'''
 
     def __init__(self, name, cat, bnd, adv, xoff, yoff):
-        self.name = name
-        self.cat = cat
-        self.bnd = bnd
-        self.adv = adv
-        self.xoff = xoff
-        self.yoff = yoff
-        self.origAdv = adv              # the advance before PolyKern changed it
-        self.cluster = None             # index of the first glyph of its cluster
+        self.name = name            # glyph name (for reports only)
+        self.cat = cat              # its glyph category, one of IGNORED .. BARRIER
+        self.bnd = bnd              # its boundary: left polyline (points bottom to top),
+                                    # right polyline (top to bottom) and bbox; or None
+        self.adv = adv              # its advance; PolyKern changes this
+        self.xoff = xoff            # its resolved x offset (from mark and cursive attachment)
+        self.yoff = yoff            # its resolved y offset; this is its y position
+        self.origAdv = adv          # its original advance: before PolyKern changed it
+        self.cluster = None         # for testing: index of the first glyph of its cluster
 
     def hasBoundary(self):
+        '''"Has a boundary and is not ignored", as the algorithm says throughout.'''
         return self.cat != IGNORED and self.bnd is not None
 
 
@@ -31,311 +41,433 @@ def positions(glyphs, rtl):
     '''x positions of the glyphs in logical order, from their advances and offsets.
     In left to right text a glyph's advance runs right, to the next glyph.
     In right to left text it runs right, to the glyph logically before it.'''
-    xs = []
-    pen = 0
-    for g in glyphs:
+    n = len(glyphs)                 # number of glyphs in the run
+    xs = [0] * n                    # xs[i] is the x position of glyph i
+    pen = 0                         # the pen position as the advances are added up
+    for i in range(n):
         if rtl:
-            pen -= g.adv
-            xs.append(pen + g.xoff)
+            pen -= glyphs[i].adv
+            xs[i] = pen + glyphs[i].xoff
         else:
-            xs.append(pen + g.xoff)
-            pen += g.adv
+            xs[i] = pen + glyphs[i].xoff
+            pen += glyphs[i].adv
     return xs
 
 
-def _divUp(a, b):
+def divUp(a, b):
+    '''a / b rounded up, for b != 0. Used for the left x, so errors only ever make the
+    glyphs further apart.'''
     if b < 0:
-        a, b = -a, -b
+        a = -a
+        b = -b
     return -((-a) // b)
 
 
-def _divDown(a, b):
+def divDown(a, b):
+    '''a / b rounded down, for b != 0. Used for the right x.'''
     if b < 0:
-        a, b = -a, -b
+        a = -a
+        b = -b
     return a // b
 
 
 def separation(R, L, dx, dy):
-    '''Separation of two glyphs. R is the right polyline of the left glyph, top to
-    bottom. L is the left polyline of the right glyph, bottom to top. Returns None
-    for none.'''
-    nR = len(R)
-    nL = len(L)
+    '''Separation of two glyphs ("Separation of two glyphs" in the specification).
+    R is the right polyline of the left glyph, top to bottom. L is the left polyline of
+    the right glyph, bottom to top, and is treated as moved by dx and dy. Returns None
+    for none (in C: a bool result and an out value).'''
+    nR = len(R)                     # number of points in R
+    nL = len(L)                     # number of points in L
     # Step 1
-    top = min(R[0][1], L[nL - 1][1] + dy)
-    bottom = max(R[nR - 1][1], L[0][1] + dy)
+    top = min(R[0][Y], L[nL - 1][Y] + dy)           # the top of the shared y range
+    bottom = max(R[nR - 1][Y], L[0][Y] + dy)        # the bottom of the shared y range
     # Step 2
     if top < bottom:
         return None
     # Step 3
-    gap = None
-    y = top
-    i = 0           # current point of R
-    j = nL - 1      # current point of L
+    haveGap = False                 # whether gap has a value yet (the gap is "none")
+    gap = 0                         # the gap: the smallest right x minus left x so far
+    y = top                         # y: the height at which the gap is being measured
+    i = 0                           # index of the current point of R
+    j = nL - 1                      # index of the current point of L
     while True:
         # Step 4
-        while R[i + 1][1] > y:
+        while R[i + 1][Y] > y:
             i += 1
         # Step 5
-        while L[j - 1][1] + dy > y:
+        while L[j - 1][Y] + dy > y:
             j -= 1
         # Step 6
-        if R[i][1] == y:
-            leftx = R[i][0]
+        if R[i][Y] == y:
+            leftx = R[i][X]         # the left x: the x of R at y
         else:
-            leftx = R[i][0] + _divUp((y - R[i][1]) * (R[i + 1][0] - R[i][0]),
-                                     R[i + 1][1] - R[i][1])
-        k = i + 1
-        while k < nR and R[k][1] == y:
-            leftx = max(leftx, R[k][0])
+            x1 = R[i][X]            # (x1, y1): the current point of R
+            y1 = R[i][Y]
+            x2 = R[i + 1][X]        # (x2, y2): the point after it, below y
+            y2 = R[i + 1][Y]
+            leftx = x1 + divUp((y - y1) * (x2 - x1), y2 - y1)
+        k = i + 1                   # steps through further points of R at y (step 6.3)
+        while k < nR and R[k][Y] == y:
+            leftx = max(leftx, R[k][X])
             k += 1
         # Step 7
-        if L[j][1] + dy == y:
-            rightx = L[j][0] + dx
+        if L[j][Y] + dy == y:
+            rightx = L[j][X] + dx   # the right x: the x of L at y
         else:
-            rightx = L[j][0] + dx + _divDown((y - L[j][1] - dy) * (L[j - 1][0] - L[j][0]),
-                                             L[j - 1][1] - L[j][1])
-        m = j - 1
-        while m >= 0 and L[m][1] + dy == y:
-            rightx = min(rightx, L[m][0] + dx)
+            x1 = L[j][X] + dx       # (x1, y1): the current point of L, moved
+            y1 = L[j][Y] + dy
+            x2 = L[j - 1][X] + dx   # (x2, y2): the point before it, below y, moved
+            y2 = L[j - 1][Y] + dy
+            rightx = x1 + divDown((y - y1) * (x2 - x1), y2 - y1)
+        m = j - 1                   # steps through further points of L at y (step 7.3)
+        while m >= 0 and L[m][Y] + dy == y:
+            rightx = min(rightx, L[m][X] + dx)
             m -= 1
         # Step 8
-        if gap is None or rightx - leftx < gap:
+        if not haveGap or rightx - leftx < gap:
             gap = rightx - leftx
+            haveGap = True
         # Step 9
         if y == bottom:
             return gap
-        # Step 10
-        y = max(bottom, R[k][1], L[m][1] + dy)
+        # Step 10 (k and m are now the next points below y)
+        y = max(bottom, max(R[k][Y], L[m][Y] + dy))
 
 
 def startsCluster(glyphs, i):
-    '''Does glyph i start a cluster? (A kernable base, or an attached base whose
-    previous glyph is not a mark, an attached base, a kernable base or ignored.)'''
-    c = glyphs[i].cat
+    '''Does glyph i start a cluster? A kernable base does; so does an attached base
+    whose previous glyph is not a mark, an attached base, a kernable base or ignored.'''
+    c = glyphs[i].cat               # the category of glyph i
     if c == KERNABLE:
         return True
     if c != ATTACHED:
         return False
-    return i == 0 or glyphs[i - 1].cat not in (MARK, ATTACHED, KERNABLE, IGNORED)
+    if i == 0:
+        return True
+    p = glyphs[i - 1].cat           # the category of the glyph before it
+    return p != MARK and p != ATTACHED and p != KERNABLE and p != IGNORED
 
 
-def calcShift(glyphs, first, last, box, reaches, rtl, stats, stop=True):
-    '''Calculate the shift for the cluster glyphs[first..last] against the glyphs before
-    it, given its box (left, bottom, right, top) and the list of reaches. Changes nothing. Returns
-    (shift, which cluster set it), where the shift is a kern (positive means more space)
-    or None. For testing: stop=False never stops the walk back early.'''
-    xs = positions(glyphs, rtl)
-    F = [f for f in range(first, last + 1) if glyphs[f].hasBoundary()]
+class Run:
+    '''The working state while PolyKern runs over a run of glyphs. In C this would be a
+    struct, with the arrays sized to the number of glyphs.'''
+
+    def __init__(self, glyphs, rtl):
+        n = len(glyphs)                     # number of glyphs in the run
+        self.glyphs = glyphs                # the glyphs, in logical order
+        self.rtl = rtl                      # whether the text is right to left
+        self.xs = positions(glyphs, rtl)    # glyph x positions, kept up to date as
+                                            # advances change (see moveFrom)
+        # The list of reaches (main step 9): one entry per cluster, holding the reach as
+        # it was just before that cluster. An entry can be none, hence the flags.
+        self.numReaches = 0                 # number of entries in the list so far
+        self.reachSet = [False] * n         # reachSet[k]: whether entry k is not none
+        self.reachVal = [0] * n             # reachVal[k]: the value of entry k
+        # Testing statistics
+        self.stats = {'walked': 0, 'separations': 0, 'clusters': 0, 'kerned': 0,
+                      'walkDepth': {}, 'bindDepth': {}, 'clusterSkips': 0}
+
+    def moveFrom(self, k, delta):
+        '''Glyph k and everything after it has moved by delta in x.'''
+        for i in range(k, len(self.glyphs)):
+            self.xs[i] += delta
+
+
+def calcShift(run, first, last, boxXMin, boxYMin, boxXMax, boxYMax, stop=True):
+    '''Calculating the shift for F ("Calculating the shift" in the specification).
+    F is the cluster glyphs[first..last]; its box is given. Changes nothing. Returns
+    (haveShift, shift, bindDepth): the shift is a kern (positive means more space).
+    bindDepth is for testing: which cluster back set the shift. For testing, stop=False
+    never stops the walk early.'''
+    glyphs = run.glyphs             # the glyphs in logical order
+    xs = run.xs                     # their current x positions
+    rtl = run.rtl                   # whether the text is right to left
+    stats = run.stats               # testing statistics
     # Step 1
-    shift = None
-    extra = 0
-    current = len(reaches)          # the current reach: just after the last entry
-    bindDepth = None
-    # Step 2
-    if box is None:
-        return None, None
-    near = box[2] if rtl else box[0]
+    haveShift = False               # whether the shift has a value yet (it is "none")
+    shift = 0                       # the shift: the least kern F needs, so far
+    extra = 0                       # the extra separation: the original advances of the
+                                    # spaces passed on the walk back so far
+    current = run.numReaches        # the current reach: index into the list of reaches,
+                                    # starting just after its last entry
+    bindDepth = 0                   # testing: how many clusters back set the shift
+    # Step 2 (the caller only calls this when F has a box)
     # Step 3
-    e = first - 1
+    e = first - 1                   # index of the earlier glyph, walking back from F
     while True:
         # Step 4
         if e < 0 or glyphs[e].cat == BARRIER:
             break
         stats['walked'] += 1
-        eg = glyphs[e]
+        eg = glyphs[e]              # the earlier glyph
         # Step 5
         if eg.cat == SPACE:
             extra += eg.origAdv
         else:
             # Step 6
             if eg.hasBoundary():
-                eb = eg.bnd.bbox
-                ebox = (xs[e] + eb[0], eg.yoff + eb[1], xs[e] + eb[2], eg.yoff + eb[3])
-                todo = F
+                eb = eg.bnd.bbox    # the earlier glyph's own box (its minPoint, maxPoint)
+                eXMin = xs[e] + eb[XMIN]        # the earlier glyph's box, moved by its
+                eYMin = eg.yoff + eb[YMIN]      # position (step 6.1)
+                eXMax = xs[e] + eb[XMAX]
+                eYMax = eg.yoff + eb[YMAX]
+                compare = True      # whether to compare it with each glyph of F (step 6.3)
                 # Step 6.1
-                if ebox[1] > box[3] or ebox[3] < box[1]:
-                    todo = []
+                if eYMin > boxYMax or eYMax < boxYMin:
+                    compare = False
                 # Step 6.2
-                gap = ebox[0] - box[2] if rtl else box[0] - ebox[2]
-                if shift is not None and extra - gap <= shift:
-                    todo = []
-                stats['clusterSkips'] = stats.get('clusterSkips', 0) + (not todo)
+                if rtl:
+                    gap = eXMin - boxXMax       # the gap between the earlier glyph's box
+                else:                           # and F's box, in x
+                    gap = boxXMin - eXMax
+                if haveShift and extra - gap <= shift:
+                    compare = False
+                if not compare:
+                    stats['clusterSkips'] += 1
                 # Step 6.3
-                for f in todo:
-                    # Step 6.3.1
-                    if rtl:
-                        l, r = f, e
-                    else:
-                        l, r = e, f
-                    lg, rg = glyphs[l], glyphs[r]
-                    # Step 6.3.2
-                    dx = xs[r] - xs[l]
-                    dy = rg.yoff - lg.yoff
-                    # Step 6.3.3
-                    lb, rb = lg.bnd.bbox, rg.bnd.bbox
-                    if rb[1] + dy > lb[3] or rb[3] + dy < lb[1]:
-                        continue
-                    # Step 6.3.4
-                    if shift is not None and extra - (rb[0] + dx - lb[2]) <= shift:
-                        continue
-                    # Step 6.3.5
-                    stats['separations'] += 1
-                    s = separation(lg.bnd.right, rg.bnd.left, dx, dy)
-                    # Step 6.3.6
-                    if s is not None:
-                        s = extra - s
-                        if shift is None or s > shift:
-                            shift = s
-                            bindDepth = len(reaches) - current + 1
+                f = first           # index of the glyph of F being compared
+                while compare and f <= last:
+                    if glyphs[f].hasBoundary():
+                        # Step 6.3.1
+                        if rtl:
+                            li = f              # index of the left glyph
+                            ri = e              # index of the right glyph
+                        else:
+                            li = e
+                            ri = f
+                        lg = glyphs[li]         # the left glyph
+                        rg = glyphs[ri]         # the right glyph
+                        # Step 6.3.2
+                        dx = xs[ri] - xs[li]    # dx, dy: the right glyph's position
+                        dy = rg.yoff - lg.yoff  # relative to the left glyph's
+                        lb = lg.bnd.bbox        # the left glyph's own box
+                        rb = rg.bnd.bbox        # the right glyph's own box
+                        # Step 6.3.3, then 6.3.4
+                        if (rb[YMIN] + dy <= lb[YMAX] and rb[YMAX] + dy >= lb[YMIN]
+                                and not (haveShift
+                                         and extra - (rb[XMIN] + dx - lb[XMAX]) <= shift)):
+                            # Step 6.3.5
+                            stats['separations'] += 1
+                            # s: the separation, then the shift it needs (step 6.3.6)
+                            s = separation(lg.bnd.right, rg.bnd.left, dx, dy)
+                            # Step 6.3.6
+                            if s is not None:
+                                s = extra - s
+                                if not haveShift or s > shift:
+                                    shift = s
+                                    haveShift = True
+                                    bindDepth = run.numReaches - current + 1
+                    f += 1
             # Step 7
             if startsCluster(glyphs, e):
                 # Step 7.1
                 current -= 1
                 if stop:
-                    reach = reaches[current]
                     # Step 7.2
-                    if reach is None:
+                    if not run.reachSet[current]:
                         break
+                    reach = run.reachVal[current]   # the current reach: the reach
+                                                    # recorded before this cluster
                     # Step 7.3
-                    gap = reach - near if rtl else near - reach
+                    if rtl:
+                        gap = reach - boxXMax   # the gap between F's box and the reach
+                    else:
+                        gap = boxXMin - reach
                     # Step 7.4
-                    if extra - gap <= (0 if shift is None else shift):
+                    limit = shift if haveShift else 0   # the shift, taking none as 0
+                    if extra - gap <= limit:
                         break
         # Step 8
         e -= 1
-    depth = len(reaches) - current
+    depth = run.numReaches - current            # testing: how far back the walk went
     stats['walkDepth'][depth] = stats['walkDepth'].get(depth, 0) + 1
     # Step 9
-    return shift, bindDepth
+    return haveShift, shift, bindDepth
 
 
-def orderRule(glyphs, first, last, prev, rtl, shift):
+def orderRule(run, first, last, prevFirst, prevLast, shift):
     '''Experimental alternative to main step 8.1: limit F by the start of the previous
     cluster's polyline bounding box instead of its width. Returns the new shift.'''
-    xs = positions(glyphs, rtl)
-    F = [f for f in range(first, last + 1) if glyphs[f].hasBoundary()]
-    P = [k for k in range(prev[0], prev[1] + 1) if glyphs[k].hasBoundary()]
+    glyphs = run.glyphs             # the glyphs in logical order
+    xs = run.xs                     # their current x positions
+    F = [k for k in range(first, last + 1) if glyphs[k].hasBoundary()]     # F's glyphs
+    P = [k for k in range(prevFirst, prevLast + 1) if glyphs[k].hasBoundary()]
+                                    # the previous cluster's glyphs
     if not F or not P:
         return shift
-    if rtl:
-        limit = (max(xs[f] + glyphs[f].bnd.bbox[2] for f in F)
-                 - max(xs[k] + glyphs[k].bnd.bbox[2] for k in P))
+    # limit: the least shift that keeps F's start from passing the previous cluster's
+    if run.rtl:
+        limit = (max(xs[k] + glyphs[k].bnd.bbox[XMAX] for k in F)
+                 - max(xs[k] + glyphs[k].bnd.bbox[XMAX] for k in P))
     else:
-        limit = (min(xs[k] + glyphs[k].bnd.bbox[0] for k in P)
-                 - min(xs[f] + glyphs[f].bnd.bbox[0] for f in F))
+        limit = (min(xs[k] + glyphs[k].bnd.bbox[XMIN] for k in P)
+                 - min(xs[k] + glyphs[k].bnd.bbox[XMIN] for k in F))
     return max(shift, limit)
 
 
 def polykern(glyphs, rtl, stop=True, cap=True, order=False):
-    '''Apply PolyKern to a list of Glyph in logical order. Changes the advances.
-    Returns statistics. For testing: stop=False never stops the walk back early,
-    cap=False leaves out step 8.1, and order=True uses an alternative to step 8.1.'''
-    stats = {'walked': 0, 'separations': 0, 'clusters': 0, 'kerned': 0,
-             'walkDepth': {}, 'bindDepth': {}}
+    '''The main algorithm ("Main algorithm" in the specification). Applies PolyKern to a
+    list of Glyph in logical order, changing their advances. Returns testing statistics.
+    For testing: stop=False never stops the walk back early, cap=False leaves out step
+    8.1, and order=True uses an alternative to step 8.1.'''
+    run = Run(glyphs, rtl)          # the working state, including the list of reaches
+    stats = run.stats               # testing statistics
+    n = len(glyphs)                 # number of glyphs in the run
     # Step 1
-    reach = None
-    reaches = []
-    prev = None
-    i = 0
+    haveReach = False               # whether the reach has a value (it is "none")
+    reach = 0                       # the reach: the furthest point, in the direction of
+                                    # the text, of any boundary so far, plus later spaces
+    havePrev = False                # whether there is a previous cluster
+    prevFirst = prevLast = 0        # the previous cluster's first and last glyphs
+    prevWidth = 0                   # the previous cluster's width (original advances)
+    i = 0                           # index of the current glyph
     while True:
         # Step 2
-        if i >= len(glyphs):
+        if i >= n:
             return stats
-        g = glyphs[i]
+        g = glyphs[i]               # the current glyph
         # Step 3
         if g.cat == SPACE:
-            if reach is not None:
-                reach += -g.origAdv if rtl else g.origAdv
+            if haveReach:
+                if rtl:
+                    reach -= g.origAdv
+                else:
+                    reach += g.origAdv
             i += 1
             continue
         # Step 4
         if g.cat == BARRIER:
-            reach = None
-            prev = None
+            haveReach = False
+            havePrev = False
             i += 1
             continue
         # Step 5
-        if g.cat in (MARK, IGNORED) or (g.cat == ATTACHED and i > 0
-                                        and glyphs[i - 1].cat in (MARK, IGNORED)):
+        if g.cat == MARK or g.cat == IGNORED or (
+                g.cat == ATTACHED and i > 0
+                and (glyphs[i - 1].cat == MARK or glyphs[i - 1].cat == IGNORED)):
             i += 1
             continue
-        # Step 6
-        xs = positions(glyphs, rtl)
-        # Step 6.1
-        last = i
-        width = 0
-        box = None
+        # Step 6.1: the current glyph is the first glyph of a new cluster, F
+        last = i                    # index of the last glyph of F, found in step 6
+        width = 0                   # F's width: the total of its original advances
+        haveBox = False             # whether F has a box (it is "none")
+        boxXMin = boxYMin = 0       # F's box: the smallest box enclosing the boxes
+        boxXMax = boxYMax = 0       # of its glyphs that have a boundary
         while True:
             # Step 6.2
-            width += glyphs[last].origAdv
-            if glyphs[last].hasBoundary():
-                b = glyphs[last].bnd.bbox
-                gbox = (xs[last] + b[0], glyphs[last].yoff + b[1],
-                        xs[last] + b[2], glyphs[last].yoff + b[3])
-                box = gbox if box is None else (min(box[0], gbox[0]), min(box[1], gbox[1]),
-                                                max(box[2], gbox[2]), max(box[3], gbox[3]))
+            lg = glyphs[last]       # the glyph being added to F
+            width += lg.origAdv
+            if lg.hasBoundary():
+                b = lg.bnd.bbox     # its own box (its minPoint and maxPoint)
+                gXMin = run.xs[last] + b[XMIN]  # its box moved by its position
+                gYMin = lg.yoff + b[YMIN]
+                gXMax = run.xs[last] + b[XMAX]
+                gYMax = lg.yoff + b[YMAX]
+                if not haveBox:
+                    boxXMin, boxYMin, boxXMax, boxYMax = gXMin, gYMin, gXMax, gYMax
+                    haveBox = True
+                else:
+                    boxXMin = min(boxXMin, gXMin)
+                    boxYMin = min(boxYMin, gYMin)
+                    boxXMax = max(boxXMax, gXMax)
+                    boxYMax = max(boxYMax, gYMax)
             # Step 6.3
-            if last + 1 < len(glyphs) and glyphs[last + 1].cat in (MARK, ATTACHED, IGNORED):
+            if last + 1 < n and (glyphs[last + 1].cat == MARK
+                                 or glyphs[last + 1].cat == ATTACHED
+                                 or glyphs[last + 1].cat == IGNORED):
                 last += 1
             else:
                 break
-        for k in range(i, last + 1):
+        for k in range(i, last + 1):            # testing: record cluster membership
             glyphs[k].cluster = i
         stats['clusters'] += 1
         # Step 7
-        shift, bindDepth = calcShift(glyphs, i, last, box, reaches, rtl, stats, stop)
+        haveShift = False           # whether F has a shift (it is "none")
+        shift = 0                   # the shift for F: a kern, positive means more space
+        bindDepth = 0               # testing: what set the shift
+        if haveBox:
+            haveShift, shift, bindDepth = calcShift(run, i, last, boxXMin, boxYMin,
+                                                    boxXMax, boxYMax, stop)
         # Step 8
-        if shift is not None:
+        if haveShift:
             # Step 8.1
-            if prev is not None and cap and shift < -prev[2]:
-                shift = -prev[2]
+            if havePrev and cap and shift < -prevWidth:
+                shift = -prevWidth
                 bindDepth = 'cap'
-            if prev is not None and order:
-                limited = orderRule(glyphs, i, last, prev, rtl, shift)
+            if havePrev and order:
+                limited = orderRule(run, i, last, prevFirst, prevLast, shift)
                 if limited != shift:
-                    shift, bindDepth = limited, 'order'
-            # Step 8.2
+                    shift = limited
+                    bindDepth = 'order'
+            # Step 8.2: change the one advance that spans the gap before F, and keep
+            # the positions up to date
             if glyphs[i - 1].cat == SPACE or not rtl:
                 glyphs[i - 1].adv += shift
+                if rtl:
+                    run.moveFrom(i - 1, -shift)
+                else:
+                    run.moveFrom(i, shift)
             else:
                 glyphs[i].adv += shift
+                run.moveFrom(i, -shift)
             stats['kerned'] += 1
             stats['bindDepth'][bindDepth] = stats['bindDepth'].get(bindDepth, 0) + 1
         # Step 9
-        reaches.append(reach)
+        run.reachSet[run.numReaches] = haveReach
+        run.reachVal[run.numReaches] = reach
+        run.numReaches += 1
         # Step 10
-        if box is not None:
-            move = shift or 0
+        if haveBox:
+            # far: F's far edge after the shift
             if rtl:
-                far = box[0] - move
-                reach = far if reach is None else min(reach, far)
+                far = boxXMin - shift if haveShift else boxXMin
+                if not haveReach or far < reach:
+                    reach = far
             else:
-                far = box[2] + move
-                reach = far if reach is None else max(reach, far)
+                far = boxXMax + shift if haveShift else boxXMax
+                if not haveReach or far > reach:
+                    reach = far
+            haveReach = True
         # Step 11
-        prev = (i, last, width)
+        havePrev = True
+        prevFirst = i
+        prevLast = last
+        prevWidth = width
         # Step 12
         i = last + 1
 
 
 def worstOverlap(glyphs, rtl):
-    '''Check the result: the smallest gap, less the spaces between, over every pair of
-    glyphs in different clusters with no barrier between them. Returns (gap, a, b).'''
-    xs = positions(glyphs, rtl)
-    worst = (None, None, None)
-    for b in range(len(glyphs)):
-        for a in range(b - 1, -1, -1):
-            if glyphs[a].cat == BARRIER:
-                break
-            if not glyphs[a].hasBoundary() or not glyphs[b].hasBoundary():
-                continue
-            if glyphs[a].cluster is not None and glyphs[a].cluster == glyphs[b].cluster:
-                continue
-            extra = sum(glyphs[k].origAdv for k in range(a + 1, b) if glyphs[k].cat == SPACE)
-            l, r = (b, a) if rtl else (a, b)
-            s = separation(glyphs[l].bnd.right, glyphs[r].bnd.left, xs[r] - xs[l],
-                           glyphs[r].yoff - glyphs[l].yoff)
-            if s is not None and (worst[0] is None or s - extra < worst[0]):
-                worst = (s - extra, a, b)
-    return worst
+    '''For testing: the smallest gap, less the spaces between, over every pair of glyphs
+    in different clusters with no barrier between them. Returns (gap, a, b), or
+    (None, None, None) if no pair overlaps vertically.'''
+    xs = positions(glyphs, rtl)     # the glyphs' x positions after kerning
+    haveWorst = False               # whether any pair has been measured yet
+    worst = 0                       # the smallest gap less spaces found so far
+    worstA = worstB = None          # the pair of glyphs it was found between
+    for b in range(len(glyphs)):    # b: the later glyph of the pair
+        a = b - 1                   # a: the earlier glyph, back to a barrier
+        while a >= 0 and glyphs[a].cat != BARRIER:
+            if (glyphs[a].hasBoundary() and glyphs[b].hasBoundary()
+                    and not (glyphs[a].cluster is not None
+                             and glyphs[a].cluster == glyphs[b].cluster)):
+                # extra: the spaces between them, which the gap must allow for
+                extra = sum(glyphs[k].origAdv for k in range(a + 1, b)
+                            if glyphs[k].cat == SPACE)
+                if rtl:
+                    li = b          # index of the left glyph
+                    ri = a          # index of the right glyph
+                else:
+                    li = a
+                    ri = b
+                s = separation(glyphs[li].bnd.right, glyphs[ri].bnd.left, xs[ri] - xs[li],
+                               glyphs[ri].yoff - glyphs[li].yoff)
+                if s is not None and (not haveWorst or s - extra < worst):
+                    worst = s - extra
+                    worstA = a
+                    worstB = b
+                    haveWorst = True
+            a -= 1
+    if not haveWorst:
+        return None, None, None
+    return worst, worstA, worstB
