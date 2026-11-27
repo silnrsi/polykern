@@ -15,6 +15,7 @@ Written 27 November 2026, for picking the work up again after a break.
 | `tests/polykern.py` | The reference implementation of the algorithm, written to carry over to C. |
 | `tests/test_polykernlib.py`, `tests/test_apps.py` | Fast unit tests: `python3 -m pytest tests/test_polykernlib.py tests/test_apps.py` (56 tests). |
 | `tests/stresstest.py`, `featest.py`, `compiletest.py`, `graphitecompare.py`, `awamitest.py`, `widthhunt.py` | Awami tests and comparisons; results go in `tests/results/`. |
+| `tests/faqcheck.py` | Reproduces the FAQ's figures by running variants of the algorithm over the corpus. |
 | `dev/FontToolsExtensions.md` | Notes on how fontTools is extended, and what else in fontTools needs work. |
 | `dev/patches/feax-polykern.patch` | PolyKern support for feax. **Not applied, on purpose**: waiting for wider agreement on the syntax. |
 
@@ -74,6 +75,9 @@ tools/polykernglyphs.py AwamiPreviewB_nokern-Regular.ttf -o tests/results/awami_
 tools/polykernlayer.py ~/Work/NRSI/scripts/font-awami/source/masters/Awami-Regular.ufo \
     -g tests/results/awami_boundary_glyphs.txt -o /tmp/AwamiPK.ufo
 tools/polykernproof.py /tmp/AwamiPK.ufo -g tests/results/awami_boundary_glyphs.txt -o tests/results/awami_boundaries.pdf
+
+# the FAQ's figures (several minutes per variant)
+tests/faqcheck.py AwamiPreviewB_nokern-Regular.ttf ~/Work/dev/awamiot/reslang.txt --worst 5
 
 # the review PDFs (Graphite, PolyKern and the font's own kerning)
 G=/usr/share/fonts/truetype/awami/AwamiNastaliq-Regular.ttf

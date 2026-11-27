@@ -1,28 +1,28 @@
 # PolyKern: Frequently Asked Questions
 
-Questions about the choices made in the PolyKern Lookup proposal (PolyKernLookup.md). The examples come from testing with Awami Nastaliq, using generated polylines and the reference implementation in the tests directory.
+Questions about the choices made in the PolyKern Lookup proposal (PolyKernLookup.md). The examples come from testing with Awami Nastaliq, using generated polylines and the reference implementation in the tests directory. Unless it says otherwise, the figures are from November 2026: 69,414 lines (every one of the 49,414 words in the test corpus, and 20,000 random phrases of three to five words), with boundaries made by `tools/polykernlayer.py`'s method at a margin of 200 units (about 10% of the em). `tests/faqcheck.py` reproduces them.
 
 ## Why does kerning a cluster look further back than the previous cluster?
 
-Because something further back can reach past it. In آرام ٻُجھسی the madda of the first letter, آ, is wide and leans left over the letters after it, ر and ا. The next word starts high, and the nearest thing at that height is the madda, four clusters back. Checking only the previous cluster, or stopping at the first earlier cluster that doesn't change the shift, lets the start of ٻُجھسی run into the madda: by 494 font units in testing.
+Because something further back can reach past it. In قِلایاؔہ گُذرانو the takhallus (ؔ) over the alef is wide, and reaches left past the next cluster, ہ, over the start of the next word, where the gaf rises to meet it. Checking only the previous cluster lets the gaf run into the takhallus: their boundaries overlap by 966 units and the ink collides.
 
-In testing over 100,000 lines, the shift was set by a cluster more than one back in about 1% of kerned clusters. It is rare, but common enough over a whole text that it has to be handled.
+Checking only the previous cluster gave ink collisions in 42 of the 69,414 test lines; the full algorithm gave none. The shift was set by a cluster more than one back for 334 of 262,672 kerned clusters (0.13%; 0.49% with 25-unit margins). It is rare, but common enough over a whole text that it has to be handled.
 
 ## Why keep a running reach, instead of checking each earlier cluster's own edge?
 
-Because a cluster's marks can reach past the clusters after it. In یوداؔہ اِلتولد the takhallus (ؔ) is attached to an alef, but it is wide and reaches past the next cluster, ہ, to meet the start of the next word. Stopping the walk back once a cluster's own edge is clear of *F* misses it. With 25-unit margins this caused collisions in 12 of 50,000 test lines; the running reach caused none, and costs one comparison per cluster.
+Because a cluster's marks can reach past the clusters after it. In یوداؔہ اِلتولد the takhallus (ؔ) is attached to an alef, but it is wide and reaches past the next cluster, ہ, to meet the start of the next word. Stopping the walk back once a cluster's own edge is clear of *F* can stop before reaching it: with 25-unit margins the boundaries in this line then overlap by 167 units. Over the test lines with 25-unit margins, stopping at each cluster's own edge gave ink collisions in 3 lines (boundaries overlapping by up to 240 units); the running reach gave none. With 200-unit margins the corpus happens to have no case where the two differ, but the reach costs only one comparison per cluster and is right whatever the margin.
 
 ## Why does the walk back stop when no shift has been found yet?
 
-Without that, a small cluster that overlaps nothing near it vertically would walk back to the start of the run, and could be pulled back over all the clusters in between to meet one far behind it. In testing, walking all the way back moved such clusters up to 6,000 units backwards, reordering the text on the page. Stopping once nothing further back could collide with the cluster where it is leaves it in place.
+Without that, a small cluster that overlaps nothing near it vertically would walk back to the start of the run, and could be pulled back over all the clusters in between to meet one far behind it. In testing with neither this stop nor the cap below, clusters were pulled back by up to 6,823 units, reordering the text on the page; with either, the largest backward kern was 3,483 units. Stopping once nothing further back could collide with the cluster where it is leaves it in place, and also keeps the walk short.
 
 ## Why can a cluster not move back past the start of the previous cluster?
 
-Without that limit, the start of a word can slide back over a short previous cluster until it hangs over the middle of the word before, even though no polylines touch. The limit is the advance width of the previous cluster, so a cluster's origin never moves back past the previous cluster's origin, and the clusters keep the order of the text.
+Without that limit, the start of a word can slide back over a short previous cluster until it hangs over the middle of the word before, even though no polylines touch. The limit is the advance width of the previous cluster, so a cluster's origin never moves back past the previous cluster's origin, and the clusters keep the order of the text. In testing the limit applied to 2,624 of 262,672 kerned clusters (1%). Without it, letters were given negative advances in 960 places instead of 612.
 
 ## Why does the kern go on the space between words, when there is one?
 
-That is what the Graphite version of Awami Nastaliq does, and it keeps the advances of letters sensible. A large kern between words makes the space narrower, or negative, rather than a letter. In testing, putting the kern on the letter instead gave negative advances to letters in 1,461 places in 20,000 lines; putting it on the space cut that to 414, all inside words where there is no space.
+That is what the Graphite version of Awami Nastaliq does, and it keeps the advances of letters sensible. A large kern between words makes the space narrower, or negative, rather than a letter. In testing, putting the kern on the letter instead gave negative advances to letters in 1,987 places; putting it on the space cut that to 612, all where there is no space to take it.
 
 ## Why are the spaces' original advances used, rather than their current ones?
 
