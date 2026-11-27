@@ -1,0 +1,834 @@
+diff --git a/src/feaxlib/__init__.py b/src/feaxlib/__init__.py
+index 8b36b4d..e5c2c86 100644
+--- a/src/feaxlib/__init__.py
++++ b/src/feaxlib/__init__.py
+@@ -5,6 +5,44 @@ from collections import OrderedDict
+ from feaxlib.feax_parser import feaplus_parser
+ from xml.etree import ElementTree as et
+ import re
++import logging
++
++POLYKERN_LAYER = 'org.sil.polykern'     # UFO layer holding the PolyKern boundaries
++
++def contour_to_polyboundary(points, is_open=False):
++    '''Turn a contour (a list of (x, y)) into the points of a <polyboundary>: up the left
++    side from the bottom, then down the right side. Coordinates are rounded to integers.
++
++    An open contour, which is how boundaries are normally drawn, is already in that order,
++    and is only reversed if it was drawn from the right. A closed contour may start at
++    any point and go either way round; it is started at the leftmost of the lowest points
++    and ended at the rightmost of them, leaving out the bottom edge between them.'''
++    pts = [(int(round(x)), int(round(y))) for x, y in points]
++    if is_open:
++        pts = [p for i, p in enumerate(pts) if i == 0 or p != pts[i - 1]]
++        if len(pts) < 2:
++            return None
++        if pts[0][0] > pts[-1][0]:
++            pts.reverse()
++        return pts
++    # drop repeated points, including the last if it closes onto the first
++    pts = [p for i, p in enumerate(pts) if p != pts[i - 1]] if len(pts) > 1 else pts
++    if len(pts) < 3:
++        return None
++    # signed area: positive is anticlockwise (y up). The left side goes up, so clockwise.
++    area = sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(pts, pts[1:] + pts[:1]))
++    if area > 0:
++        pts.reverse()
++    bottom = min(y for x, y in pts)
++    start = min((i for i, p in enumerate(pts) if p[1] == bottom), key=lambda i: pts[i][0])
++    pts = pts[start:] + pts[:start]
++    # the right side ends at the rightmost lowest point; take the first if several
++    lowest = [i for i, p in enumerate(pts) if p[1] == bottom and i > 0]
++    if lowest:
++        rightmost = max(pts[i][0] for i in lowest)
++        end = min(i for i in lowest if pts[i][0] == rightmost)
++        pts = pts[:end + 1]
++    return pts
+ 
+ class Glyph(object) :
+     def __init__(self, name, advance=0, bbox=None):
+@@ -13,6 +51,8 @@ class Glyph(object) :
+         self.is_mark = False
+         self.advance = int(advance)
+         self.bbox = bbox or (0, 0, 0, 0)
++        self.has_outline = False        # has contours or components
++        self.polyboundary = None        # <polyboundary> points from the PolyKern layer
+ 
+     def add_anchor(self, anchor):
+         self.anchors[anchor.name] = (int(anchor.x), int(anchor.y))
+@@ -47,6 +87,7 @@ class Font(object) :
+         self.fontinfo = FontInfo(f.info)
+         omittedaps = set(omitaps.replace(',',' ').split())  # allow comma- and/or space-separated list
+         skipglyphs = set(f.lib.get('public.skipExportGlyphs', []))
++        pklayer = f.layers[POLYKERN_LAYER] if POLYKERN_LAYER in f.layers else None
+         # import pdb; pdb.set_trace()
+         for g in f.keys():
+             if g in skipglyphs or (ignoreglyphsRE and ignoreglyphsRE.search(g)):
+@@ -71,6 +112,9 @@ class Font(object) :
+                 # Use the preferred ufoLib2 method
+                 bbox = ufo_g.getBounds(layer)
+             glyph = Glyph(g, advance=adv, bbox=bbox)
++            glyph.has_outline = len(ufo_g.contours) > 0 or len(ufo_g.components) > 0
++            if pklayer is not None and g in pklayer:
++                glyph.polyboundary = self.read_polyboundary(pklayer[g])
+             self.glyphs[g] = glyph
+             for a in ufo_g.anchors:
+                 if a.name not in omittedaps:
+@@ -86,6 +130,22 @@ class Font(object) :
+                 r = "@" + r
+             self.kerns.setdefault(l, {})[r] = v
+ 
++    def read_polyboundary(self, layerglyph):
++        '''The <polyboundary> points for a glyph in the PolyKern layer, or None if it has
++        no contour there.'''
++        contours = [c for c in layerglyph.contours if len(c.points)]
++        if not contours:
++            return None
++        if len(contours) > 1:
++            logging.warning("Glyph %s has %d contours in the %s layer; using the first",
++                            layerglyph.name, len(contours), POLYKERN_LAYER)
++        res = contour_to_polyboundary([(p.x, p.y) for p in contours[0].points],
++                                      contours[0].open)
++        if res is None:
++            logging.warning("Glyph %s has too few points in the %s layer", layerglyph.name,
++                            POLYKERN_LAYER)
++        return res
++
+     def read_classes(self, fname, classproperties=False):
+         doc = et.parse(fname)
+         for c in doc.findall('.//class'):
+diff --git a/src/feaxlib/feax_ast.py b/src/feaxlib/feax_ast.py
+index 2624869..64f335e 100644
+--- a/src/feaxlib/feax_ast.py
++++ b/src/feaxlib/feax_ast.py
+@@ -479,3 +479,109 @@ class ast_KernPairsStatement(ast.Statement):
+ 
+         return ("\n"+indent).join(res)
+ 
++
++
++# PolyKern (GPOS lookup type 10) and the lookup support condition: see the PolyKern
++# proposal. feax passes this syntax through, and can generate it from the UFO.
++
++POLYKERN_CONDITIONSET = "PolyKernSupported"     # the condition set polykernlookups uses
++POLYKERN_LOOKUP_TEST = ("GPOS", 10, 1)          # table, lookup type, subtable format
++
++class ast_PolyBoundary(ast.Expression):
++    """<polyboundary NULL> (points is None) or <polyboundary x y, x y, ...>"""
++    def __init__(self, points, location=None):
++        super(ast_PolyBoundary, self).__init__(location)
++        self.points = points
++
++    def asFea(self, indent=""):
++        if self.points is None:
++            return "<polyboundary NULL>"
++        return "<polyboundary " + ", ".join("{} {}".format(x, y) for x, y in self.points) + ">"
++
++class ast_PolyKernPosStatement(ast.Statement):
++    """pos polybase GLYPHS <polyboundary ...>; or pos polymark GLYPHS <polyboundary ...>;"""
++    def __init__(self, role, glyphs, boundary, location=None):
++        super(ast_PolyKernPosStatement, self).__init__(location)
++        self.role, self.glyphs, self.boundary = role, glyphs, boundary
++
++    def build(self, builder):
++        builder.add_polykern(self.location, self.role, self.glyphs.glyphSet(), self.boundary)
++
++    def asFea(self, indent=""):
++        return "pos {} {} {};".format(self.role, asFea(self.glyphs), self.boundary.asFea())
++
++class ast_PolyKernStatement(ast.Statement):
++    """polykern [@attached [@spaces]]; expanded into the PolyKern statements it generates."""
++    def __init__(self, statements, location=None):
++        super(ast_PolyKernStatement, self).__init__(location)
++        self.statements = statements
++
++    def build(self, builder):
++        for s in self.statements:
++            s.build(builder)
++
++    def asFea(self, indent=""):
++        return ("\n" + indent).join(s.asFea(indent=indent) for s in self.statements)
++
++class ast_ConditionsetStatement(ast.ConditionsetStatement):
++    """A condition set that may also hold lookup support tests: (table, type, format)."""
++    def __init__(self, name, conditions, lookuptests=(), location=None):
++        super(ast_ConditionsetStatement, self).__init__(name, conditions, location=location)
++        self.lookuptests = list(lookuptests)
++
++    def build(self, builder):
++        if self.lookuptests:
++            builder.add_conditionset(self.location, self.name, self.conditions, self.lookuptests)
++        else:
++            builder.add_conditionset(self.location, self.name, self.conditions)
++
++    def asFea(self, res="", indent=""):
++        res += indent + "conditionset {} ".format(self.name) + "{\n"
++        for tag, (minvalue, maxvalue) in self.conditions.items():
++            res += indent + SHIFT + "{} {} {};\n".format(tag, minvalue, maxvalue)
++        for table, lookupType, subtableFormat in self.lookuptests:
++            res += indent + SHIFT + "lookup {} {} {};\n".format(table, lookupType, subtableFormat)
++        res += indent + "}" + " {};\n".format(self.name)
++        return res
++
++class ast_VariationBlock(ast.VariationBlock):
++    """A variation block that may say replace (optionally naming lookups) or have an else
++    block (a FeatureBlock for the same feature)."""
++    def __init__(self, name, conditionset, use_extension=False, replace=False,
++                 replaceLookups=(), elseBlock=None, location=None):
++        super(ast_VariationBlock, self).__init__(name, conditionset, use_extension, location)
++        self.replace = replace
++        self.replaceLookups = list(replaceLookups)
++        self.elseBlock = elseBlock
++
++    def asFea(self, indent=""):
++        res = indent + "variation {} {} ".format(self.name.strip(), self.conditionset)
++        if self.replace:
++            res += " ".join(["replace"] + [l.name for l in self.replaceLookups]) + " "
++        if self.use_extension:
++            res += "useExtension "
++        res += "{\n" + ast.Block.asFea(self, indent=indent) + indent + "} "
++        if self.elseBlock is not None:
++            res += "else {\n" + ast.Block.asFea(self.elseBlock, indent=indent) + indent + "} "
++        res += "{};\n".format(self.name.strip())
++        return res
++
++class ast_PolyKernLookupsStatement(ast.Statement):
++    """polykernlookups FEATURE POLYKERNLOOKUP { fallback ... };
++    Expands to the PolyKern condition set (the first time) and a variation block that uses
++    the PolyKern lookup when the engine supports it, and the fallback otherwise."""
++    def __init__(self, conditionset, variation, location=None):
++        super(ast_PolyKernLookupsStatement, self).__init__(location)
++        self.conditionset = conditionset    # None if an earlier statement wrote it
++        self.variation = variation
++
++    def build(self, builder):
++        if self.conditionset is not None:
++            self.conditionset.build(builder)
++        self.variation.build(builder)
++
++    def asFea(self, indent=""):
++        res = ""
++        if self.conditionset is not None:
++            res += self.conditionset.asFea(indent=indent) + "\n"
++        return res + self.variation.asFea(indent=indent)
+diff --git a/src/feaxlib/feax_parser.py b/src/feaxlib/feax_parser.py
+index b8e26cd..4cae476 100644
+--- a/src/feaxlib/feax_parser.py
++++ b/src/feaxlib/feax_parser.py
+@@ -25,6 +25,12 @@ class feaplus_ast(object) :
+     AlternateSubstStatement = astx.ast_AlternateSubstStatement
+     Comment = astx.ast_Comment
+     KernPairsStatement = astx.ast_KernPairsStatement
++    PolyBoundary = astx.ast_PolyBoundary
++    PolyKernPosStatement = astx.ast_PolyKernPosStatement
++    PolyKernStatement = astx.ast_PolyKernStatement
++    PolyKernLookupsStatement = astx.ast_PolyKernLookupsStatement
++    ConditionsetStatement = astx.ast_ConditionsetStatement
++    VariationBlock = astx.ast_VariationBlock
+ 
+     def __getattr__(self, name):
+         return getattr(ast, name) # retrieve undefined attrs from imported fontTools.feaLib ast module
+@@ -36,7 +42,9 @@ class feaplus_parser(Parser) :
+         'ifinfo': lambda s: s.parseIfInfo(),
+         'do': lambda s: s.parseDoStatement_(),
+         'def': lambda s: s.parseDefStatement_(),
+-        'kernpairs': lambda s: s.parseKernPairsStatement_()
++        'kernpairs': lambda s: s.parseKernPairsStatement_(),
++        'polykern': lambda s: s.parsePolyKern_(),
++        'polykernlookups': lambda s: s.parsePolyKernLookups_()
+     }
+     ast = feaplus_ast()
+ 
+@@ -734,3 +742,283 @@ class feaplus_parser(Parser) :
+         if astx.safeeval(funcstr):
+             exec(funcstr, self.fns)
+         return self.ast.Comment("# def " + fname)
++
++
++    # PolyKern (GPOS lookup type 10) and lookup support conditions. The FEA syntax is
++    # passed through:
++    #   pos polybase GLYPHS <polyboundary x y, x y, ...>;   (or <polyboundary NULL>)
++    #   pos polymark GLYPHS <polyboundary ...>;
++    #   conditionset NAME { lookup GPOS 10 1; } NAME;
++    #   variation TAG NAME { ... } else { ... } TAG;
++    #   variation TAG NAME replace [LOOKUP ...] { ... } TAG;
++    # and two feax statements generate it:
++    #   polykern [@attached [@spaces]];       inside the PolyKern lookup
++    #   polykernlookups TAG LOOKUP { ... };   at the top level
++
++    def parse_position_(self, enumerated, vertical):
++        if self.next_token_ in ("polybase", "polymark"):
++            return self.parse_position_poly_(enumerated, vertical)
++        return super(feaplus_parser, self).parse_position_(enumerated, vertical)
++
++    def parse_position_poly_(self, enumerated, vertical):
++        location = self.cur_token_location_
++        role = self.expect_name_()
++        if enumerated:
++            raise FeatureLibError('"enumerate" is not allowed with {}'.format(role), location)
++        glyphs = self.parse_glyphclass_(accept_glyphname=True)
++        boundary = self.parse_polyboundary_()
++        self.expect_symbol_(";")
++        return self.ast.PolyKernPosStatement(role, glyphs, boundary, location=location)
++
++    def parse_polyboundary_(self):
++        self.expect_symbol_("<")
++        self.expect_keyword_("polyboundary")
++        location = self.cur_token_location_
++        if self.next_token_ == "NULL":
++            self.expect_keyword_("NULL")
++            self.expect_symbol_(">")
++            return self.ast.PolyBoundary(None, location=location)
++        points = []
++        while True:
++            points.append((self.expect_number_(), self.expect_number_()))
++            if self.next_token_ == ",":
++                self.expect_symbol_(",")
++                continue
++            self.expect_symbol_(">")
++            break
++        return self.ast.PolyBoundary(points, location=location)
++
++    def parse_conditionset_(self):
++        """As fontTools' parse_conditionset_, but also accepts lookup support tests:
++        lookup GPOS|GSUB <lookup type> <subtable format>;"""
++        location = self.cur_token_location_
++        name = self.expect_name_()
++        conditions = {}
++        lookuptests = []
++        self.expect_symbol_("{")
++        while self.next_token_ != "}":
++            self.advance_lexer_()
++            if self.is_cur_keyword_("lookup"):
++                table = self.expect_name_()
++                if table not in ("GPOS", "GSUB"):
++                    raise FeatureLibError("Expected GPOS or GSUB", self.cur_token_location_)
++                lookuptests.append((table, self.expect_number_(), self.expect_number_()))
++                self.expect_symbol_(";")
++                continue
++            if self.cur_token_type_ is not Lexer.NAME:
++                raise FeatureLibError("Expected an axis name", self.cur_token_location_)
++            axis = self.cur_token_
++            if axis in conditions:
++                raise FeatureLibError("Repeated condition for axis {}".format(axis),
++                                      self.cur_token_location_)
++            values = []
++            for _ in range(2):
++                if self.next_token_type_ is Lexer.FLOAT:
++                    values.append(self.expect_float_())
++                else:
++                    values.append(self.expect_number_(variable=False))
++            self.expect_symbol_(";")
++            conditions[axis] = tuple(values)
++        self.expect_symbol_("}")
++        finalname = self.expect_name_()
++        if finalname != name:
++            raise FeatureLibError('Expected "%s"' % name, self.cur_token_location_)
++        return self.ast.ConditionsetStatement(name, conditions, lookuptests, location=location)
++
++    def parse_feature_block_(self, variation=False):
++        """As fontTools' parse_feature_block_, but a variation block may say replace
++        (optionally followed by lookup names) after its condition set, or have an else
++        block."""
++        if not variation:
++            return super(feaplus_parser, self).parse_feature_block_(variation)
++        location = self.cur_token_location_
++        tag = self.expect_tag_()
++        vertical = tag in {"vkrn", "vpal", "vhal", "valt"}
++        stylisticset = tag if tag in self.SS_FEATURE_TAGS else None
++        cv_feature = tag if tag in self.CV_FEATURE_TAGS else None
++        size_feature = tag == "size"
++        conditionset = self.expect_name_()
++        replace = False
++        replaceLookups = []
++        if self.next_token_ == "replace":
++            self.expect_keyword_("replace")
++            replace = True
++            while self.next_token_type_ is Lexer.NAME and self.next_token_ != "useExtension":
++                name = self.expect_name_()
++                lookup = self.lookups_.resolve(name)
++                if lookup is None:
++                    raise FeatureLibError('Unknown lookup "{}"'.format(name),
++                                          self.cur_token_location_)
++                replaceLookups.append(lookup)
++        use_extension = False
++        if self.next_token_ == "useExtension":
++            self.expect_keyword_("useExtension")
++            use_extension = True
++        block = self.ast.VariationBlock(tag, conditionset, use_extension=use_extension,
++                                        replace=replace, replaceLookups=replaceLookups,
++                                        location=location)
++        self.parse_block_(block, vertical, stylisticset, size_feature, cv_feature,
++                          closing=False)
++        if self.next_token_ == "else":
++            self.expect_keyword_("else")
++            if replace:
++                raise FeatureLibError("A variation block cannot have both replace and else",
++                                      self.cur_token_location_)
++            block.elseBlock = self.ast.FeatureBlock(tag, use_extension=use_extension,
++                                                    location=self.cur_token_location_)
++            self.parse_block_(block.elseBlock, vertical, stylisticset, size_feature,
++                              cv_feature)
++        else:
++            self.parse_block_closing_(block)
++        return block
++
++    def parse_block_closing_(self, block):
++        name = self.expect_name_()
++        if name != block.name.strip():
++            raise FeatureLibError('Expected "%s"' % block.name.strip(),
++                                  self.cur_token_location_)
++        self.expect_symbol_(";")
++
++    def parse_block_(self, block, vertical, stylisticset=None, size_feature=False,
++                     cv_feature=None, closing=True):
++        """A copy of fontTools' parse_block_, except that with closing false it stops
++        after the closing brace, so that an else block (or a ;) can follow."""
++        self.expect_symbol_("{")
++        for symtab in self.symbol_tables_:
++            symtab.enter_scope()
++
++        statements = block.statements
++        while self.next_token_ != "}" or self.cur_comments_:
++            self.advance_lexer_(comments=True)
++            if self.cur_token_type_ is Lexer.COMMENT:
++                statements.append(
++                    self.ast.Comment(self.cur_token_, location=self.cur_token_location_))
++            elif self.cur_token_type_ is Lexer.GLYPHCLASS:
++                statements.append(self.parse_glyphclass_definition_())
++            elif self.is_cur_keyword_("anchorDef"):
++                statements.append(self.parse_anchordef_())
++            elif self.is_cur_keyword_({"enum", "enumerate"}):
++                statements.append(self.parse_enumerate_(vertical=vertical))
++            elif self.is_cur_keyword_("feature"):
++                statements.append(self.parse_feature_reference_())
++            elif self.is_cur_keyword_("ignore"):
++                statements.append(self.parse_ignore_())
++            elif self.is_cur_keyword_("language"):
++                statements.append(self.parse_language_())
++            elif self.is_cur_keyword_("lookup"):
++                statements.append(self.parse_lookup_(vertical))
++            elif self.is_cur_keyword_("lookupflag"):
++                statements.append(self.parse_lookupflag_())
++            elif self.is_cur_keyword_("markClass"):
++                statements.append(self.parse_markClass_())
++            elif self.is_cur_keyword_({"pos", "position"}):
++                statements.append(self.parse_position_(enumerated=False, vertical=vertical))
++            elif self.is_cur_keyword_("script"):
++                statements.append(self.parse_script_())
++            elif self.is_cur_keyword_({"sub", "substitute", "rsub", "reversesub"}):
++                statements.append(self.parse_substitute_())
++            elif self.is_cur_keyword_("subtable"):
++                statements.append(self.parse_subtable_())
++            elif self.is_cur_keyword_("valueRecordDef"):
++                statements.append(self.parse_valuerecord_definition_(vertical))
++            elif stylisticset and self.is_cur_keyword_("featureNames"):
++                statements.append(self.parse_featureNames_(stylisticset))
++            elif cv_feature and self.is_cur_keyword_("cvParameters"):
++                statements.append(self.parse_cvParameters_(cv_feature))
++            elif size_feature and self.is_cur_keyword_("parameters"):
++                statements.append(self.parse_size_parameters_())
++            elif size_feature and self.is_cur_keyword_("sizemenuname"):
++                statements.append(self.parse_size_menuname_())
++            elif self.cur_token_type_ is Lexer.NAME and self.cur_token_ in self.extensions:
++                statements.append(self.extensions[self.cur_token_](self))
++            elif self.cur_token_ == ";":
++                continue
++            else:
++                raise FeatureLibError(
++                    "Expected glyph class definition or statement: got {} {}".format(
++                        self.cur_token_type_, self.cur_token_),
++                    self.cur_token_location_)
++
++        self.expect_symbol_("}")
++        for symtab in self.symbol_tables_:
++            symtab.exit_scope()
++        if closing:
++            self.parse_block_closing_(block)
++
++    def parsePolyKern_(self):
++        """polykern [@attached [@spaces]];  NULL in place of a class means work it out.
++        Generates the pos polybase and pos polymark statements for the PolyKern lookup:
++          - attached (pos polymark): glyphs with an attachment point starting with _
++          - spaces (pos polybase, NULL boundary): other glyphs with no outline
++          - bases (pos polybase): other glyphs with a contour in the PolyKern layer
++        Boundaries come from the PolyKern layer of the UFO. Other glyphs are barriers."""
++        location = self.cur_token_location_
++        given = []
++        while self.next_token_ != ";":
++            if len(given) == 2:
++                raise FeatureLibError("polykern takes at most two glyph classes", location)
++            if self.next_token_ == "NULL":
++                self.expect_keyword_("NULL")
++                given.append(None)
++            else:
++                given.append(set(self.parse_glyphclass_(accept_glyphname=False).glyphSet()))
++        self.expect_symbol_(";")
++        given += [None] * (2 - len(given))
++
++        def info(name):
++            return self.glyphs.get(name) if hasattr(self.glyphs, 'get') else None
++
++        def boundary(name):
++            g = info(name)
++            return getattr(g, 'polyboundary', None) if g is not None else None
++
++        attached = given[0]
++        if attached is None:
++            attached = set(n for n in self.glyphs
++                           if any(a.startswith("_") for a in getattr(info(n), 'anchors', {})))
++        spaces = given[1]
++        if spaces is None:
++            spaces = set(n for n in self.glyphs if n not in attached
++                         and not getattr(info(n), 'has_outline', True))
++        statements = []
++        for n in self.glyphs:
++            if n in attached:
++                role = "polymark"
++            elif n in spaces:
++                if boundary(n) is not None:
++                    logging.warning("Space glyph %s has a contour in the PolyKern layer, "
++                                    "which is ignored", n)
++                statements.append(self.ast.PolyKernPosStatement("polybase",
++                        self.ast.GlyphName(n), self.ast.PolyBoundary(None), location=location))
++                continue
++            elif boundary(n) is not None:
++                role = "polybase"
++            else:
++                continue
++            statements.append(self.ast.PolyKernPosStatement(role, self.ast.GlyphName(n),
++                    self.ast.PolyBoundary(boundary(n)), location=location))
++        return self.ast.PolyKernStatement(statements, location=location)
++
++    def parsePolyKernLookups_(self):
++        """polykernlookups TAG POLYKERNLOOKUP { fallback statements };
++        Writes the PolyKern support condition set (the first time) and
++            variation TAG PolyKernSupported { lookup POLYKERNLOOKUP; } else { ... } TAG;
++        so that the fallback statements are used by engines without PolyKern."""
++        location = self.cur_token_location_
++        tag = self.expect_tag_()
++        name = self.expect_name_()
++        lookup = self.lookups_.resolve(name)
++        if lookup is None:
++            raise FeatureLibError('Unknown lookup "{}"'.format(name), self.cur_token_location_)
++        elseBlock = self.ast.FeatureBlock(tag, location=location)
++        self.parse_block_(elseBlock, False, closing=False)
++        self.expect_symbol_(";")
++        conditionset = None
++        if not getattr(self, 'polykern_conditionset_', False):
++            conditionset = self.ast.ConditionsetStatement(astx.POLYKERN_CONDITIONSET, {},
++                    [astx.POLYKERN_LOOKUP_TEST], location=location)
++            self.polykern_conditionset_ = True
++        variation = self.ast.VariationBlock(tag, astx.POLYKERN_CONDITIONSET,
++                                            elseBlock=elseBlock, location=location)
++        variation.statements.append(self.ast.LookupReferenceStatement(lookup, location=location))
++        return self.ast.PolyKernLookupsStatement(conditionset, variation, location=location)
+diff --git a/tests/data/polykern.fea b/tests/data/polykern.fea
+new file mode 100644
+index 0000000..e53503f
+--- /dev/null
++++ b/tests/data/polykern.fea
+@@ -0,0 +1,64 @@
++languagesystem DFLT dflt;
++languagesystem latn dflt;
++@Joined = [LtnSmB];
++@Gaps = [Space];
++lookup PairKernFallback {
++    pos LtnSmA LtnSmB -20;
++} PairKernFallback;
++
++lookup PolyKern {
++    lookupflag 0;
++    pos polybase .null <polyboundary NULL>;
++    pos polymark CombAcute <polyboundary 100 600, 120 800, 300 800, 320 600>;
++    pos polymark CombCircum <polyboundary NULL>;
++    pos polymark CombDiaer <polyboundary NULL>;
++    pos polymark CombGrave <polyboundary NULL>;
++    pos polymark CombRingAbv <polyboundary NULL>;
++    pos polymark CombTilde <polyboundary NULL>;
++    pos polybase LtnSmA <polyboundary -40 -20, -20 560, 520 560, 540 -20>;
++    pos polybase LtnSmB <polyboundary -20 -20, -20 760, 300 780, 520 780, 560 300, 560 -20>;
++    pos polybase LtnSmC <polyboundary 0 -20, -20 200, 40 560, 480 560, 520 300, 500 -20>;
++    pos polybase Space <polyboundary NULL>;
++    pos polybase nonmarkingreturn <polyboundary NULL>;
++} PolyKern;
++
++lookup PolyKernGiven {
++    pos polybase CombAcute <polyboundary 100 600, 120 800, 300 800, 320 600>;
++    pos polybase LtnSmA <polyboundary -40 -20, -20 560, 520 560, 540 -20>;
++    pos polymark LtnSmB <polyboundary -20 -20, -20 760, 300 780, 520 780, 560 300, 560 -20>;
++    pos polybase LtnSmC <polyboundary 0 -20, -20 200, 40 560, 480 560, 520 300, 500 -20>;
++    pos polybase Space <polyboundary NULL>;
++} PolyKernGiven;
++
++lookup PolyKernSpacesOnly {
++    pos polymark CombAcute <polyboundary 100 600, 120 800, 300 800, 320 600>;
++    pos polymark CombCircum <polyboundary NULL>;
++    pos polymark CombDiaer <polyboundary NULL>;
++    pos polymark CombGrave <polyboundary NULL>;
++    pos polymark CombRingAbv <polyboundary NULL>;
++    pos polymark CombTilde <polyboundary NULL>;
++    pos polybase LtnSmA <polyboundary -40 -20, -20 560, 520 560, 540 -20>;
++    pos polybase LtnSmB <polyboundary -20 -20, -20 760, 300 780, 520 780, 560 300, 560 -20>;
++    pos polybase LtnSmC <polyboundary 0 -20, -20 200, 40 560, 480 560, 520 300, 500 -20>;
++    pos polybase Space <polyboundary NULL>;
++} PolyKernSpacesOnly;
++
++feature kern {
++    pos LtnSmV LtnSmA -30;
++} kern;
++
++conditionset PolyKernSupported {
++    lookup GPOS 10 1;
++} PolyKernSupported;
++
++variation kern PolyKernSupported {
++    lookup PolyKern;
++} else {
++    lookup PairKernFallback;
++} kern;
++
++variation dist PolyKernSupported {
++    lookup PolyKern;
++} else {
++    pos LtnSmA LtnSmV -10;
++} dist;
+diff --git a/tests/data/polykern.feax b/tests/data/polykern.feax
+new file mode 100644
+index 0000000..7778559
+--- /dev/null
++++ b/tests/data/polykern.feax
+@@ -0,0 +1,34 @@
++languagesystem DFLT dflt;
++languagesystem latn dflt;
++
++@Joined = [LtnSmB];
++@Gaps = [Space];
++
++lookup PairKernFallback {
++    pos LtnSmA LtnSmB -20;
++} PairKernFallback;
++
++lookup PolyKern {
++    lookupflag 0;
++    polykern;
++} PolyKern;
++
++lookup PolyKernGiven {
++    polykern @Joined @Gaps;
++} PolyKernGiven;
++
++lookup PolyKernSpacesOnly {
++    polykern NULL @Gaps;
++} PolyKernSpacesOnly;
++
++feature kern {
++    pos LtnSmV LtnSmA -30;
++} kern;
++
++polykernlookups kern PolyKern {
++    lookup PairKernFallback;
++};
++
++polykernlookups dist PolyKern {
++    pos LtnSmA LtnSmV -10;
++};
+diff --git a/tests/data/polykernpass.fea b/tests/data/polykernpass.fea
+new file mode 100644
+index 0000000..9f66521
+--- /dev/null
++++ b/tests/data/polykernpass.fea
+@@ -0,0 +1,33 @@
++languagesystem DFLT dflt;
++lookup Fallback {
++    pos LtnSmA LtnSmB -20;
++} Fallback;
++
++lookup PolyKern {
++    pos polybase [LtnSmA LtnSmB] <polyboundary 0 -20, 10 720, 480 720, 500 -20>;
++    pos polybase Space <polyboundary NULL>;
++    pos polymark CombAcute <polyboundary 100 600, 120 800, 300 800, 320 600>;
++    pos polymark CombGrave <polyboundary NULL>;
++} PolyKern;
++
++conditionset PKSupported {
++    lookup GPOS 10 1;
++} PKSupported;
++
++feature kern {
++    lookup Fallback;
++} kern;
++
++variation kern PKSupported replace Fallback {
++    lookup PolyKern;
++} kern;
++
++variation dist PKSupported replace {
++    lookup PolyKern;
++} dist;
++
++variation mark PKSupported {
++    lookup PolyKern;
++} else {
++    pos LtnSmA LtnSmV -10;
++} mark;
+diff --git a/tests/data/polykernpass.feax b/tests/data/polykernpass.feax
+new file mode 100644
+index 0000000..e447731
+--- /dev/null
++++ b/tests/data/polykernpass.feax
+@@ -0,0 +1,34 @@
++languagesystem DFLT dflt;
++
++lookup Fallback {
++    pos LtnSmA LtnSmB -20;
++} Fallback;
++
++lookup PolyKern {
++    pos polybase [LtnSmA LtnSmB] <polyboundary 0 -20, 10 720, 480 720, 500 -20>;
++    pos polybase Space <polyboundary NULL>;
++    pos polymark CombAcute <polyboundary 100 600, 120 800, 300 800, 320 600>;
++    pos polymark CombGrave <polyboundary NULL>;
++} PolyKern;
++
++conditionset PKSupported {
++    lookup GPOS 10 1;
++} PKSupported;
++
++feature kern {
++    lookup Fallback;
++} kern;
++
++variation kern PKSupported replace Fallback {
++    lookup PolyKern;
++} kern;
++
++variation dist PKSupported replace {
++    lookup PolyKern;
++} dist;
++
++variation mark PKSupported {
++    lookup PolyKern;
++} else {
++    pos LtnSmA LtnSmV -10;
++} mark;
+diff --git a/tests/test_polykern.py b/tests/test_polykern.py
+new file mode 100644
+index 0000000..928f51e
+--- /dev/null
++++ b/tests/test_polykern.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/python3
++'''Tests for the PolyKern syntax: passing it through, and generating it from the UFO with
++polykern and polykernlookups.'''
++
++import os
++import unittest
++from pathlib import Path
++
++import feaxlib
++from feaxlib import contour_to_polyboundary, POLYKERN_LAYER
++import ufoLib2
++
++
++def addPolyKernLayer(font):
++    '''Add a PolyKern layer to the test font: LtnSmA, LtnSmB and LtnSmC as bases, and
++    CombAcute as an attached glyph. LtnSmA and LtnSmB are closed contours that start at
++    different points and go both ways round. LtnSmC is an open contour, as boundaries are
++    normally drawn, but drawn from the right.'''
++    layer = font.newLayer(POLYKERN_LAYER)
++    shapes = {
++        # anticlockwise, starting top right
++        'LtnSmA': [(520, 560), (-20, 560), (-40, -20), (540, -20)],
++        # clockwise, starting bottom right, with a flat top
++        'LtnSmB': [(560, -20), (-20, -20), (-20, 760), (300, 780), (520, 780), (560, 300)],
++        # a mark above
++        'CombAcute': [(100, 600), (120, 800), (300, 800), (320, 600)],
++    }
++    for name, points in shapes.items():
++        glyph = layer.newGlyph(name)
++        pen = glyph.getPen()
++        pen.moveTo(points[0])
++        for p in points[1:]:
++            pen.lineTo(p)
++        pen.closePath()
++    glyph = layer.newGlyph('LtnSmC')
++    pen = glyph.getPointPen()
++    pen.beginPath()
++    for i, p in enumerate([(500, -20), (520, 300), (480, 560), (40, 560), (-20, 200), (0, -20)]):
++        pen.addPoint(p, segmentType='move' if i == 0 else 'line')
++    pen.endPath()
++
++
++class PolyKernTests(unittest.TestCase):
++
++    def setUp(self):
++        os.chdir('tests/data')
++        self.font = ufoLib2.Font.open('../font-psf-test/source/PsfTest-Regular.ufo')
++
++    def tearDown(self):
++        self.font.close()
++        os.chdir('../..')
++
++    def parse(self, basename):
++        feafont = feaxlib.Font()
++        feafont.readaps(self.font)
++        feafont.make_marks()
++        feafont.make_classes(None)
++        p = feaxlib.feaplus_parser(None, feafont.glyphs, feafont.fontinfo, feafont.kerns,
++                                   feafont.defines)
++        return p.parse(f'{basename}.feax').asFea().strip()
++
++    def check(self, basename):
++        actual = self.parse(basename)
++        expected = Path(f'{basename}.fea').read_text().strip()
++        if actual != expected:
++            Path(f'{basename}.actual.fea').write_text(actual + '\n')
++        assert actual == expected
++
++    def test_generate(self):
++        addPolyKernLayer(self.font)
++        self.check('polykern')
++
++    def test_passthrough(self):
++        self.check('polykernpass')
++
++    def test_passthrough_reparses(self):
++        '''The FEA written out reads back in to the same FEA.'''
++        first = self.parse('polykernpass')
++        Path('polykernpass.out.feax').write_text(first)
++        try:
++            again = self.parse('polykernpass.out')
++        finally:
++            os.unlink('polykernpass.out.feax')
++        assert again == first
++
++    def test_no_layer(self):
++        '''Without a PolyKern layer, only the attached glyphs and spaces are generated.'''
++        out = self.parse('polykern')
++        assert 'pos polybase LtnSmA' not in out
++        assert 'pos polymark CombAcute <polyboundary NULL>;' in out
++        assert 'pos polybase Space <polyboundary NULL>;' in out
++
++    def test_contour(self):
++        # anticlockwise square from the top right
++        assert contour_to_polyboundary([(100, 100), (0, 100), (0, 0), (100, 0)]) == \
++            [(0, 0), (0, 100), (100, 100), (100, 0)]
++        # clockwise from the bottom right, with points along the bottom left out
++        assert contour_to_polyboundary(
++            [(100, 0), (50, 0), (0, 0), (0, 50), (10, 100), (90, 100), (100, 50)]) == \
++            [(0, 0), (0, 50), (10, 100), (90, 100), (100, 50), (100, 0)]
++        # a closing point repeating the first is dropped; values are rounded
++        assert contour_to_polyboundary([(0.4, 0), (0, 10.6), (10, 11), (10, 0), (0, 0)]) == \
++            [(0, 0), (0, 11), (10, 11), (10, 0)]
++        assert contour_to_polyboundary([(0, 0), (1, 1)]) is None
++        # open contours are kept as drawn, reversed if drawn from the right
++        assert contour_to_polyboundary([(0, 0), (0, 100), (100, 100), (100, 0)], True) == \
++            [(0, 0), (0, 100), (100, 100), (100, 0)]
++        assert contour_to_polyboundary([(100, 0), (100, 100), (0, 100), (0, 0)], True) == \
++            [(0, 0), (0, 100), (100, 100), (100, 0)]
++        assert contour_to_polyboundary([(0, 0)], True) is None
++
++
++if __name__ == '__main__':
++    unittest.main()

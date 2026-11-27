@@ -21,7 +21,7 @@ from fontTools.ttLib import TTFont
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from makepolylines import makeAllBoundaries, arabicGlyphs
 from polykern import (Glyph, polykern, positions, worstOverlap,
-                      IGNORED, MARK, ATTACHED, SPACE, KERNABLE, BARRIER, CATNAMES)
+                      IGNORED, ATTACHED, SPACE, KERNABLE, BARRIER, CATNAMES)
 
 DEFAULT_TEXTS = [
     'پاکستان',
@@ -57,7 +57,7 @@ def cursiveEntryGlyphs(font):
 class Tables:
     '''The data a PolyKern subtable would hold, worked out from the font.'''
 
-    def __init__(self, fontpath, margin, ignore=None, maxArea=1000):
+    def __init__(self, fontpath, margin, ignore=None, maxArea=None):
         self.ignore = re.compile(ignore) if ignore else None
         self.font = TTFont(fontpath)
         self.glyphOrder = self.font.getGlyphOrder()
@@ -71,14 +71,13 @@ class Tables:
         spaces = {cmap[u] for u in (0x20, 0xA0) if u in cmap}
         # baseCoverage: Arabic bases and spaces. Spaces are the ones with no boundary.
         self.baseCoverage = {g for g in arabic if self.glyphClass.get(g, 1) != 3} | spaces
-        self.attachedCoverage = cursiveEntryGlyphs(self.font) - {
+        # attachedCoverage: marks, and bases joined to the glyph before them
+        self.attachedCoverage = cursiveEntryGlyphs(self.font) | {
             g for g, c in self.glyphClass.items() if c == 3}
 
     def category(self, name):
         if self.ignore and self.ignore.search(name):
             return IGNORED
-        if self.glyphClass.get(name) == 3:
-            return MARK
         if name in self.attachedCoverage:
             return ATTACHED
         if name in self.baseCoverage:
@@ -135,7 +134,7 @@ def svgLine(tables, paths, res, xs, yorig, showPolys):
             tables.font.getGlyphSet()[g.name].draw(pen)
             paths[g.name] = pen.getCommands()
         tx = x - minx
-        colour = {MARK: '#1f6fb2', ATTACHED: '#222', KERNABLE: '#222'}.get(g.cat, '#b22')
+        colour = '#1f6fb2' if tables.glyphClass.get(g.name) == 3 else {ATTACHED: '#222', KERNABLE: '#222'}.get(g.cat, '#b22')
         out.append(f'<path transform="translate({tx},{yorig - g.yoff}) scale(1,-1)" '
                    f'd="{paths[g.name]}" fill="{colour}"/>')
         if showPolys and g.hasBoundary():
@@ -178,7 +177,7 @@ def main():
     p.add_argument('-p', '--polylines', action='store_true', help='Draw polylines in the SVG')
     p.add_argument('--nokern', action='store_true', help="Turn off the font's own kern feature")
     p.add_argument('-i', '--ignore', help='Regular expression for glyph names to treat as ignored')
-    p.add_argument('-a', '--maxarea', type=float, default=1000,
+    p.add_argument('-a', '--maxarea', type=float, default=None,
                    help='Simplify polylines while the error triangle is below this area')
     p.add_argument('-v', '--verbose', action='store_true', help='List glyphs and changes')
     p.add_argument('--nocap', action='store_true',

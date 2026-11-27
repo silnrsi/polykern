@@ -9,8 +9,8 @@ leave them out.
 '''
 
 # The glyph categories (see "Glyph categories" in the specification)
-IGNORED, MARK, ATTACHED, SPACE, KERNABLE, BARRIER = range(6)
-CATNAMES = ['ignored', 'mark', 'attached', 'space', 'kernable', 'barrier']
+IGNORED, ATTACHED, SPACE, KERNABLE, BARRIER = range(5)
+CATNAMES = ['ignored', 'attached', 'space', 'kernable', 'barrier']
 
 # Indexes into a point (x, y) and a bounding box (xMin, yMin, xMax, yMax). A boundary's
 # bbox is its minPoint and maxPoint.
@@ -135,17 +135,17 @@ def separation(R, L, dx, dy):
 
 
 def startsCluster(glyphs, i):
-    '''Does glyph i start a cluster? A kernable base does; so does an attached base
-    whose previous glyph is not a mark, an attached base, a kernable base or ignored.'''
+    '''Does glyph i start a cluster? A kernable base does; so does an attached glyph
+    with a boundary whose previous glyph is not attached, a kernable base or ignored.'''
     c = glyphs[i].cat               # the category of glyph i
     if c == KERNABLE:
         return True
-    if c != ATTACHED:
+    if c != ATTACHED or not glyphs[i].hasBoundary():
         return False
     if i == 0:
         return True
     p = glyphs[i - 1].cat           # the category of the glyph before it
-    return p != MARK and p != ATTACHED and p != KERNABLE and p != IGNORED
+    return p != ATTACHED and p != KERNABLE and p != IGNORED
 
 
 class Run:
@@ -342,9 +342,8 @@ def polykern(glyphs, rtl, stop=True, cap=True, order=False):
             i += 1
             continue
         # Step 5
-        if g.cat == MARK or g.cat == IGNORED or (
-                g.cat == ATTACHED and i > 0
-                and (glyphs[i - 1].cat == MARK or glyphs[i - 1].cat == IGNORED)):
+        if g.cat == IGNORED or (g.cat == ATTACHED and (not g.hasBoundary() or (
+                i > 0 and (glyphs[i - 1].cat == ATTACHED or glyphs[i - 1].cat == IGNORED)))):
             i += 1
             continue
         # Step 6.1: the current glyph is the first glyph of a new cluster, F
@@ -372,8 +371,7 @@ def polykern(glyphs, rtl, stop=True, cap=True, order=False):
                     boxXMax = max(boxXMax, gXMax)
                     boxYMax = max(boxYMax, gYMax)
             # Step 6.3
-            if last + 1 < n and (glyphs[last + 1].cat == MARK
-                                 or glyphs[last + 1].cat == ATTACHED
+            if last + 1 < n and (glyphs[last + 1].cat == ATTACHED
                                  or glyphs[last + 1].cat == IGNORED):
                 last += 1
             else:

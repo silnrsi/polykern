@@ -33,7 +33,7 @@ _tables = _hbfont = _features = None
 _inkcache = {}
 
 
-def _init(fontpath, margin, ignore, nokern, maxArea=1000):
+def _init(fontpath, margin, ignore, nokern, maxArea=None):
     global _tables, _hbfont, _features
     _tables = Tables(fontpath, margin, ignore, maxArea)
     _hbfont = hb.Font(hb.Face(hb.Blob.from_file_path(fontpath)))
@@ -162,7 +162,7 @@ def main():
     p.add_argument('-m', '--margin', type=int, default=200, help='Polyline margin in font units')
     p.add_argument('-i', '--ignore')
     p.add_argument('--nokern', action='store_true')
-    p.add_argument('-a', '--maxarea', type=float, default=1000,
+    p.add_argument('-a', '--maxarea', type=float, default=None,
                    help='Simplify polylines while the error triangle is below this area')
     p.add_argument('-j', '--jobs', type=int, default=os.cpu_count())
     p.add_argument('-o', '--output', help='Write failing and interesting lines here')

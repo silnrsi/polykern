@@ -24,7 +24,7 @@ from fontTools.ttLib import TTFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from awamitest import Tables, shape
-from polykern import Glyph, polykern, positions, MARK, KERNABLE, ATTACHED
+from polykern import Glyph, polykern, positions, KERNABLE, ATTACHED
 
 
 def graphiteShape(fontpath, text):
@@ -142,7 +142,7 @@ def main():
     p.add_argument('otfont', help='OpenType font (without kerning)')
     p.add_argument('grfont', help='Graphite font')
     p.add_argument('lines', help='File of test lines; lines starting # are headings')
-    p.add_argument('-m', '--margin', type=int, default=125)
+    p.add_argument('-m', '--margin', type=int, default=200)
     p.add_argument('-o', '--svg', help='Write the comparison SVG here')
     p.add_argument('-p', '--pdf', help='Write the comparison as an A4 PDF, laid out as a grid')
     p.add_argument('--margins', help='Comma separated margins to score, e.g. 100,150,200')

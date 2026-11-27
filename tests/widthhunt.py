@@ -63,7 +63,7 @@ def main():
     p.add_argument('grfont', help='Graphite font')
     p.add_argument('words', help='Word list: lines starting with a quoted word')
     p.add_argument('-o', '--output', required=True, help='Test lines file to write')
-    p.add_argument('-m', '--margin', type=int, default=125)
+    p.add_argument('-m', '--margin', type=int, default=200)
     p.add_argument('-n', '--phrases', type=int, default=20000)
     p.add_argument('-t', '--top', type=int, default=12, help='How many of each kind to keep')
     p.add_argument('--seed', type=int, default=1)
